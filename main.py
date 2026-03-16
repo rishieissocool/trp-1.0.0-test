@@ -75,7 +75,7 @@ def main():
         foreground.append(
             Process(target=run_goalie,
                     args=(is_running, dispatch_q, wm,
-                          4, preset.us_yellow)))
+                          3, preset.us_yellow)))
         foreground.append(
             Process(target=run_striker,
                     args=(is_running, dispatch_q, wm,

@@ -14,6 +14,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from TeamControl.process_workers.vision_runner import VisionProcess
 from TeamControl.process_workers.gcfsm_runner import GCfsm
 from TeamControl.process_workers.wm_runner import WMWorker
+from TeamControl.process_workers.robot_recv_runner import RobotRecv
 from TeamControl.world.model_manager import WorldModelManager
 from TeamControl.dispatcher.dispatch import Dispatcher
 from TeamControl.utils.yaml_config import Config
@@ -83,6 +84,7 @@ class SimEngine(QObject):
         self._vision_q: Queue | None = None
         self._gc_q: Queue | None = None
         self._dispatch_q: Queue | None = None
+        self._recv_q: Queue | None = None
         self._grsim_sender: grSimSender | None = None
 
         self._running = False
@@ -123,6 +125,7 @@ class SimEngine(QObject):
         self._vision_q = Queue()
         self._gc_q = Queue()
         self._dispatch_q = Queue()
+        self._recv_q = Queue()
         self._is_running = Event()
 
         self._wm_manager = WorldModelManager()
@@ -144,6 +147,9 @@ class SimEngine(QObject):
                     daemon=True),
             Process(target=Dispatcher.run_worker,
                     args=(self._is_running, None, self._dispatch_q, preset),
+                    daemon=True),
+            Process(target=RobotRecv.run_worker,
+                    args=(self._is_running, None, self._recv_q),
                     daemon=True),
         ]
 
@@ -195,6 +201,7 @@ class SimEngine(QObject):
 
         self._wm = None
         self._wm_manager = None
+        self._recv_q = None
         self._running = False
         self._mode = ""
         self._grsim_sender = None
@@ -251,6 +258,22 @@ class SimEngine(QObject):
                 self.game_state_ready.emit(gs)
         except Exception as exc:
             self.log_message.emit(f"[engine] poll error: {exc}")
+
+        self._drain_recv_queue()
+
+    def _drain_recv_queue(self):
+        """Pull all pending robot responses from the receiver queue."""
+        if self._recv_q is None:
+            return
+        batch = 0
+        while batch < 50:
+            try:
+                data, addr = self._recv_q.get_nowait()
+                addr_str = f"{addr[0]}:{addr[1]}" if addr else "?"
+                self.log_message.emit(f"[recv] {addr_str} → {data}")
+                batch += 1
+            except Exception:
+                break
 
     def _extract_snapshot(self, frame) -> FrameSnapshot:
         snap = FrameSnapshot()

@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPlainTextEdit,
 from PySide6.QtCore import Qt, QTime
 from PySide6.QtGui import QTextCharFormat, QColor, QFont
 
-from TeamControl.ui.theme import ACCENT, TEXT_DIM, SUCCESS, WARNING, DANGER
+from TeamControl.ui.theme import ACCENT, TEXT_DIM, SUCCESS, WARNING, DANGER, BLUE_TEAM
 
 
 class LogPanel(QWidget):
@@ -27,7 +27,7 @@ class LogPanel(QWidget):
         tb.setSpacing(4)
 
         self._filter_combo = QComboBox()
-        self._filter_combo.addItems(["All", "engine", "sim", "vision", "gc", "error"])
+        self._filter_combo.addItems(["All", "engine", "sim", "vision", "gc", "recv", "error"])
         self._filter_combo.setFixedWidth(100)
 
         self._search = QLineEdit()
@@ -76,12 +76,13 @@ class LogPanel(QWidget):
         if search and search not in message.lower():
             return
 
-        # Color by level
         color = "#eaeaea"
         if "[error]" in message.lower() or "error" in message.lower():
             color = DANGER
         elif "[warn" in message.lower():
             color = WARNING
+        elif "[recv]" in message.lower():
+            color = BLUE_TEAM
         elif "[sim]" in message.lower():
             color = SUCCESS
         elif "[engine]" in message.lower():

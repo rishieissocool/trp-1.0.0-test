@@ -1,13 +1,11 @@
 """
 Hardware Test Console — direct robot connectivity testing & manual control.
 
-Lets you:
-  - Pick any robot from ipconfig or type a custom IP:port
-  - Send individual test commands (spin, drive, kick, stop)
-  - Use sliders for real-time manual control at 20 Hz
-  - See the exact raw packet being sent
-  - Verify grSim connectivity separately
-  - View a live packet log with timestamps and error highlighting
+Tabbed layout:
+  Connect & Drive  — pick a robot, set exact velocities, send commands
+  Quick Tests      — one-click preset movements
+  Robots           — full ipconfig.yaml table
+  Packet Log       — raw packet inspector + scrolling log
 """
 
 import time
@@ -20,14 +18,14 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QSlider, QPlainTextEdit, QCheckBox,
     QTabWidget, QFrame, QSplitter, QSizePolicy, QHeaderView,
     QTableWidget, QTableWidgetItem, QAbstractItemView,
-    QScrollArea,
+    QScrollArea, QSpacerItem,
 )
 from PySide6.QtCore import Qt, QTimer, QTime, Signal
 from PySide6.QtGui import QFont, QColor
 
 from TeamControl.ui.theme import (
     ACCENT, TEXT_DIM, SUCCESS, DANGER, WARNING,
-    YELLOW_TEAM, BLUE_TEAM, BG_DARK, BG_MID,
+    YELLOW_TEAM, BLUE_TEAM, BG_DARK, BG_MID, BORDER,
 )
 
 from TeamControl.network.robot_command import RobotCommand
@@ -37,15 +35,11 @@ from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.utils.yaml_config import Config
 
 
-# ── Helpers ──────────────────────────────────────────────────────────
-
 def _ts():
     return QTime.currentTime().toString("HH:mm:ss.zzz")
 
 
 class _LogView(QPlainTextEdit):
-    """Packet log with coloured entries."""
-
     MAX_LINES = 2000
 
     def __init__(self):
@@ -70,10 +64,7 @@ class _LogView(QPlainTextEdit):
             f'<span style="color:#eaeaea">{msg}</span>')
 
 
-# ── Robot test card (one per robot in ipconfig) ──────────────────────
-
 class _RobotRow:
-    """Data for one row in the robot table."""
     __slots__ = ("label", "team", "shell_id", "grsim_id", "ip", "port")
 
     def __init__(self, label, team, shell_id, grsim_id, ip, port):
@@ -85,7 +76,18 @@ class _RobotRow:
         self.port = port
 
 
-# ── Main Panel ───────────────────────────────────────────────────────
+def _heading(text):
+    lbl = QLabel(text)
+    lbl.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT}; padding:2px 0;")
+    return lbl
+
+
+def _sep():
+    line = QFrame()
+    line.setFrameShape(QFrame.HLine)
+    line.setStyleSheet(f"color:{BORDER};")
+    return line
+
 
 class TestPanel(QWidget):
     """Hardware testing & manual robot control console."""
@@ -95,297 +97,388 @@ class TestPanel(QWidget):
         self._sender = Sender()
         self._grsim: grSimSender | None = None
         self._continuous_timer = QTimer(self)
-        self._continuous_timer.setInterval(50)  # 20 Hz
+        self._continuous_timer.setInterval(50)
         self._continuous_timer.timeout.connect(self._send_continuous)
         self._robots: list[_RobotRow] = []
+        self._n_sent = 0
+        self._n_err = 0
 
         self._build_ui()
         self._load_robots()
 
-    # ── UI construction ───────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    #  UI
+    # ══════════════════════════════════════════════════════════════
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Three-column layout via splitter ──────────────────────
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setHandleWidth(6)
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.addTab(self._build_drive_tab(), "Connect && Drive")
+        tabs.addTab(self._build_quick_tab(), "Quick Tests")
+        tabs.addTab(self._build_robots_tab(), "Robots")
+        tabs.addTab(self._build_log_tab(), "Packet Log")
+        root.addWidget(tabs)
 
-        # ══════════════════════════════════════════════════════════
-        #  COLUMN 1 — Target + Manual Command  (scrollable)
-        # ══════════════════════════════════════════════════════════
-        col1_inner = QWidget()
-        c1 = QVBoxLayout(col1_inner)
-        c1.setContentsMargins(4, 4, 4, 4)
-        c1.setSpacing(10)
+    # ── Tab 1: Connect & Drive ────────────────────────────────────
 
-        c1_title = QLabel("Target & Control")
-        c1_title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{ACCENT};")
-        c1.addWidget(c1_title)
+    def _build_drive_tab(self):
+        page = QWidget()
+        outer = QHBoxLayout(page)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(16)
 
-        # Target selection
-        tgt = QGroupBox("Robot Target")
-        tgl = QGridLayout(tgt)
-        tgl.setSpacing(8)
+        # ── Left column: target ───────────────────────────────────
+        left = QVBoxLayout()
+        left.setSpacing(12)
 
-        tgl.addWidget(QLabel("Robot:"), 0, 0)
+        left.addWidget(_heading("Robot Target"))
+
+        tg = QGridLayout()
+        tg.setSpacing(8)
+        tg.setColumnStretch(1, 1)
+
+        tg.addWidget(QLabel("Preset:"), 0, 0)
         self._robot_combo = QComboBox()
         self._robot_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._robot_combo.currentIndexChanged.connect(self._on_robot_selected)
-        tgl.addWidget(self._robot_combo, 0, 1, 1, 3)
+        tg.addWidget(self._robot_combo, 0, 1, 1, 3)
 
-        tgl.addWidget(QLabel("IP:"), 1, 0)
+        tg.addWidget(QLabel("IP Address:"), 1, 0)
         self._ip_edit = QLineEdit("127.0.0.1")
-        tgl.addWidget(self._ip_edit, 1, 1)
-        tgl.addWidget(QLabel("Port:"), 1, 2)
+        tg.addWidget(self._ip_edit, 1, 1, 1, 3)
+
+        tg.addWidget(QLabel("Port:"), 2, 0)
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1025, 65534)
         self._port_spin.setValue(50514)
-        tgl.addWidget(self._port_spin, 1, 3)
+        tg.addWidget(self._port_spin, 2, 1)
 
-        tgl.addWidget(QLabel("Shell ID:"), 2, 0)
+        tg.addWidget(QLabel("Shell ID:"), 3, 0)
         self._id_spin = QSpinBox()
         self._id_spin.setRange(0, 15)
-        tgl.addWidget(self._id_spin, 2, 1)
-        tgl.addWidget(QLabel("Team:"), 2, 2)
+        tg.addWidget(self._id_spin, 3, 1)
+
+        tg.addWidget(QLabel("Team:"), 4, 0)
         self._team_combo = QComboBox()
         self._team_combo.addItems(["Yellow", "Blue"])
-        tgl.addWidget(self._team_combo, 2, 3)
+        tg.addWidget(self._team_combo, 4, 1)
+
+        left.addLayout(tg)
 
         ping_btn = QPushButton("Test Connection")
-        ping_btn.setMinimumHeight(32)
+        ping_btn.setMinimumHeight(36)
         ping_btn.setStyleSheet(f"font-weight:bold; color:{ACCENT};")
         ping_btn.clicked.connect(self._test_connection)
-        tgl.addWidget(ping_btn, 3, 0, 1, 4)
+        left.addWidget(ping_btn)
 
-        c1.addWidget(tgt)
+        left.addWidget(_sep())
+        left.addWidget(_heading("grSim"))
 
-        # Manual command sliders
-        cmd = QGroupBox("Manual Command")
-        cl = QGridLayout(cmd)
-        cl.setSpacing(8)
-
-        self._vx_slider = self._make_slider("VX (m/s)", -3.0, 3.0, cl, 0)
-        self._vy_slider = self._make_slider("VY (m/s)", -3.0, 3.0, cl, 1)
-        self._w_slider = self._make_slider("W (rad/s)", -10.0, 10.0, cl, 2)
-
-        kick_row = QHBoxLayout()
-        self._kick_cb = QCheckBox("Kick")
-        self._kick_cb.setStyleSheet("font-weight:bold;")
-        self._dribble_cb = QCheckBox("Dribble")
-        self._dribble_cb.setStyleSheet("font-weight:bold;")
-        kick_row.addWidget(self._kick_cb)
-        kick_row.addWidget(self._dribble_cb)
-        kick_row.addStretch()
-        cl.addLayout(kick_row, 3, 0, 1, 4)
-
-        c1.addWidget(cmd)
-
-        # Send buttons
-        send_row = QHBoxLayout()
-        send_row.setSpacing(6)
-        send_once = QPushButton("Send Once")
-        send_once.setObjectName("startBtn")
-        send_once.setMinimumHeight(36)
-        send_once.clicked.connect(self._send_once)
-        self._cont_btn = QPushButton("Continuous (20 Hz)")
-        self._cont_btn.setMinimumHeight(36)
-        self._cont_btn.clicked.connect(self._toggle_continuous)
-        stop_btn = QPushButton("STOP")
-        stop_btn.setObjectName("stopBtn")
-        stop_btn.setMinimumHeight(36)
-        stop_btn.clicked.connect(self._send_stop)
-        send_row.addWidget(send_once)
-        send_row.addWidget(self._cont_btn)
-        send_row.addWidget(stop_btn)
-        c1.addLayout(send_row)
-
-        # grSim section
-        gs = QGroupBox("grSim")
-        gsl = QGridLayout(gs)
-        gsl.setSpacing(6)
-
+        gsl = QGridLayout()
+        gsl.setSpacing(8)
         gsl.addWidget(QLabel("IP:"), 0, 0)
         self._grsim_ip = QLineEdit("127.0.0.1")
         gsl.addWidget(self._grsim_ip, 0, 1)
-        gsl.addWidget(QLabel("Port:"), 0, 2)
+        gsl.addWidget(QLabel("Port:"), 1, 0)
         self._grsim_port = QSpinBox()
         self._grsim_port.setRange(1025, 65534)
         self._grsim_port.setValue(20011)
-        gsl.addWidget(self._grsim_port, 0, 3)
+        gsl.addWidget(self._grsim_port, 1, 1)
+        left.addLayout(gsl)
 
-        self._grsim_also = QCheckBox("Mirror commands to grSim")
+        self._grsim_also = QCheckBox("Mirror every command to grSim")
         self._grsim_also.setStyleSheet("font-weight:bold;")
-        gsl.addWidget(self._grsim_also, 1, 0, 1, 2)
+        left.addWidget(self._grsim_also)
 
-        grsim_test = QPushButton("Test grSim")
+        grsim_test = QPushButton("Test grSim (spin robot 0)")
+        grsim_test.setMinimumHeight(34)
         grsim_test.clicked.connect(self._test_grsim)
-        gsl.addWidget(grsim_test, 1, 2, 1, 2)
+        left.addWidget(grsim_test)
 
-        c1.addWidget(gs)
-        c1.addStretch()
+        left.addStretch()
 
-        col1_scroll = QScrollArea()
-        col1_scroll.setWidgetResizable(True)
-        col1_scroll.setWidget(col1_inner)
-        col1_scroll.setMinimumWidth(340)
-        col1_scroll.setFrameShape(QFrame.NoFrame)
-        splitter.addWidget(col1_scroll)
+        left_w = QWidget()
+        left_w.setLayout(left)
+        left_w.setFixedWidth(320)
+        outer.addWidget(left_w)
 
-        # ══════════════════════════════════════════════════════════
-        #  COLUMN 2 — Quick Tests + Robot Table
-        # ══════════════════════════════════════════════════════════
-        col2 = QWidget()
-        c2 = QVBoxLayout(col2)
-        c2.setContentsMargins(4, 4, 4, 4)
-        c2.setSpacing(10)
+        # Vertical divider
+        div = QFrame()
+        div.setFrameShape(QFrame.VLine)
+        div.setStyleSheet(f"color:{BORDER};")
+        outer.addWidget(div)
 
-        c2_title = QLabel("Quick Tests")
-        c2_title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{ACCENT};")
-        c2.addWidget(c2_title)
+        # ── Right column: velocity + send ─────────────────────────
+        right = QVBoxLayout()
+        right.setSpacing(12)
 
-        qt = QGroupBox("Movement Tests")
-        ql = QGridLayout(qt)
-        ql.setSpacing(6)
+        right.addWidget(_heading("Velocity Command"))
+
+        vel_grid = QGridLayout()
+        vel_grid.setSpacing(10)
+        vel_grid.setColumnStretch(1, 1)
+
+        self._vx_spin, self._vx_slider = self._make_vel_row(
+            "VX  (tangent)", -5.0, 5.0, 0.0, "m/s", vel_grid, 0)
+        self._vy_spin, self._vy_slider = self._make_vel_row(
+            "VY  (normal)", -5.0, 5.0, 0.0, "m/s", vel_grid, 1)
+        self._w_spin, self._w_slider = self._make_vel_row(
+            "W   (angular)", -2.0, 2.0, 0.0, "rad/s", vel_grid, 2)
+
+        right.addLayout(vel_grid)
+
+        right.addWidget(_sep())
+        right.addWidget(_heading("Kick & Dribble"))
+
+        kd_grid = QGridLayout()
+        kd_grid.setSpacing(10)
+
+        self._kick_cb = QCheckBox("Kick")
+        self._kick_cb.setStyleSheet("font-size:14px; font-weight:bold;")
+        self._dribble_cb = QCheckBox("Dribble / Spinner")
+        self._dribble_cb.setStyleSheet("font-size:14px; font-weight:bold;")
+
+        kd_grid.addWidget(self._kick_cb, 0, 0)
+        kd_grid.addWidget(self._dribble_cb, 0, 1)
+
+        self._kick_speed_spin = QDoubleSpinBox()
+        self._kick_speed_spin.setRange(0, 20)
+        self._kick_speed_spin.setValue(10.0)
+        self._kick_speed_spin.setSingleStep(0.5)
+        self._kick_speed_spin.setSuffix(" m/s")
+        self._kick_speed_spin.setPrefix("Kick speed: ")
+        kd_grid.addWidget(self._kick_speed_spin, 1, 0, 1, 2)
+
+        right.addLayout(kd_grid)
+
+        right.addWidget(_sep())
+        right.addWidget(_heading("Send"))
+
+        send_grid = QGridLayout()
+        send_grid.setSpacing(8)
+
+        send_once = QPushButton("Send Once")
+        send_once.setObjectName("startBtn")
+        send_once.setMinimumHeight(44)
+        send_once.setStyleSheet("font-size:14px;")
+        send_once.clicked.connect(self._send_once)
+        send_grid.addWidget(send_once, 0, 0)
+
+        self._cont_btn = QPushButton("Start Continuous (20 Hz)")
+        self._cont_btn.setMinimumHeight(44)
+        self._cont_btn.setStyleSheet("font-size:14px;")
+        self._cont_btn.clicked.connect(self._toggle_continuous)
+        send_grid.addWidget(self._cont_btn, 0, 1)
+
+        stop_btn = QPushButton("STOP")
+        stop_btn.setObjectName("stopBtn")
+        stop_btn.setMinimumHeight(44)
+        stop_btn.setStyleSheet("font-size:14px;")
+        stop_btn.clicked.connect(self._send_stop)
+        send_grid.addWidget(stop_btn, 1, 0)
+
+        zero_btn = QPushButton("Zero All Inputs")
+        zero_btn.setMinimumHeight(44)
+        zero_btn.setStyleSheet("font-size:14px;")
+        zero_btn.clicked.connect(self._zero_inputs)
+        send_grid.addWidget(zero_btn, 1, 1)
+
+        right.addLayout(send_grid)
+
+        # Raw packet preview (inline)
+        right.addWidget(_sep())
+        right.addWidget(_heading("Last Packet"))
+        self._raw_label = QLabel("No packets sent yet")
+        self._raw_label.setFont(QFont("Cascadia Code", 11))
+        self._raw_label.setWordWrap(True)
+        self._raw_label.setMinimumHeight(60)
+        self._raw_label.setStyleSheet(
+            f"background:{BG_DARK}; padding:10px; border:1px solid {BORDER}; "
+            f"border-radius:6px; color:{ACCENT};")
+        self._raw_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        right.addWidget(self._raw_label)
+
+        right.addStretch()
+        outer.addLayout(right, 1)
+
+        return page
+
+    # ── Tab 2: Quick Tests ────────────────────────────────────────
+
+    def _build_quick_tab(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(12)
+
+        lay.addWidget(_heading("One-Click Movement Tests"))
+        lay.addWidget(QLabel(
+            "Each button sends a single command to the currently selected robot. "
+            "Make sure you've picked a target on the Connect & Drive tab first."))
 
         tests = [
-            ("Spin CW",       0.0,  0.0,  5.0, 0, 0),
-            ("Spin CCW",      0.0,  0.0, -5.0, 0, 0),
-            ("Drive Forward", 1.0,  0.0,  0.0, 0, 0),
-            ("Drive Back",   -1.0,  0.0,  0.0, 0, 0),
-            ("Strafe Left",   0.0,  1.0,  0.0, 0, 0),
-            ("Strafe Right",  0.0, -1.0,  0.0, 0, 0),
-            ("Kick",          0.0,  0.0,  0.0, 1, 0),
-            ("Dribble",       0.0,  0.0,  0.0, 0, 1),
-            ("Diagonal FL",   1.0,  1.0,  0.0, 0, 0),
-            ("Full Send",     2.0,  0.0,  0.0, 1, 1),
+            ("Spin CW",        0.0,  0.0,   1.5, 0, 0, "Rotate clockwise at 1.5 rad/s"),
+            ("Spin CCW",       0.0,  0.0,  -1.5, 0, 0, "Rotate counter-clockwise at 1.5 rad/s"),
+            ("Drive Forward",  1.0,  0.0,   0.0, 0, 0, "Move forward at 1 m/s"),
+            ("Drive Back",    -1.0,  0.0,   0.0, 0, 0, "Move backward at 1 m/s"),
+            ("Strafe Left",    0.0,  1.0,   0.0, 0, 0, "Strafe left at 1 m/s"),
+            ("Strafe Right",   0.0, -1.0,   0.0, 0, 0, "Strafe right at 1 m/s"),
+            ("Slow Forward",   0.3,  0.0,   0.0, 0, 0, "Crawl forward at 0.3 m/s"),
+            ("Fast Forward",   2.5,  0.0,   0.0, 0, 0, "Sprint forward at 2.5 m/s"),
+            ("Diagonal FL",    1.0,  1.0,   0.0, 0, 0, "Move diagonally forward-left"),
+            ("Diagonal FR",    1.0, -1.0,   0.0, 0, 0, "Move diagonally forward-right"),
+            ("Arc Left",       1.0,  0.0,   1.0, 0, 0, "Drive forward while turning left"),
+            ("Arc Right",      1.0,  0.0,  -1.0, 0, 0, "Drive forward while turning right"),
+            ("Kick",           0.0,  0.0,   0.0, 1, 0, "Fire kicker"),
+            ("Dribble",        0.0,  0.0,   0.0, 0, 1, "Activate dribbler/spinner"),
+            ("Kick + Forward", 1.0,  0.0,   0.0, 1, 0, "Drive forward and kick"),
+            ("Full Send",      2.0,  0.0,   0.0, 1, 1, "Full speed + kick + dribble"),
         ]
-        for i, (name, vx, vy, w, k, d) in enumerate(tests):
+
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        cols = 4
+        for i, (name, vx, vy, w, k, d, tip) in enumerate(tests):
             btn = QPushButton(name)
-            btn.setMinimumHeight(32)
+            btn.setMinimumHeight(48)
+            btn.setMinimumWidth(140)
+            btn.setToolTip(f"{tip}\nvx={vx}  vy={vy}  w={w}  kick={k}  dribble={d}")
+            btn.setStyleSheet("font-size:13px;")
             btn.clicked.connect(
                 lambda checked=False, vx=vx, vy=vy, w=w, k=k, d=d:
                     self._send_test(vx, vy, w, k, d))
-            ql.addWidget(btn, i // 2, i % 2)
+            grid.addWidget(btn, i // cols, i % cols)
+        lay.addLayout(grid)
+
+        lay.addWidget(_sep())
+
+        stop_row = QHBoxLayout()
+        stop_btn = QPushButton("STOP SELECTED ROBOT")
+        stop_btn.setObjectName("stopBtn")
+        stop_btn.setMinimumHeight(50)
+        stop_btn.setStyleSheet("font-size:15px;")
+        stop_btn.clicked.connect(self._send_stop)
+        stop_row.addWidget(stop_btn)
 
         stop_all = QPushButton("STOP ALL ROBOTS")
         stop_all.setObjectName("stopBtn")
-        stop_all.setMinimumHeight(38)
+        stop_all.setMinimumHeight(50)
+        stop_all.setStyleSheet("font-size:15px;")
         stop_all.clicked.connect(self._stop_all)
-        ql.addWidget(stop_all, (len(tests) // 2) + 1, 0, 1, 2)
+        stop_row.addWidget(stop_all)
+        lay.addLayout(stop_row)
 
-        c2.addWidget(qt)
+        lay.addStretch()
+        return page
 
-        # Known robots table
-        rt_box = QGroupBox("Configured Robots (ipconfig.yaml)")
-        rtl = QVBoxLayout(rt_box)
+    # ── Tab 3: Robots table ───────────────────────────────────────
+
+    def _build_robots_tab(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(12)
+
+        lay.addWidget(_heading("All Configured Robots (ipconfig.yaml)"))
+        lay.addWidget(QLabel(
+            "Click a row to select that robot as the target on the Connect & Drive tab."))
+
         self._robot_table = QTableWidget(0, 6)
         self._robot_table.setHorizontalHeaderLabels(
-            ["Team", "Label", "Shell", "grSim", "IP", "Port"])
+            ["Team", "Label", "Shell ID", "grSim ID", "IP Address", "Port"])
         self._robot_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._robot_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._robot_table.setAlternatingRowColors(True)
         self._robot_table.verticalHeader().setVisible(False)
         hh = self._robot_table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Stretch)
-        hh.setMinimumSectionSize(40)
+        hh.setMinimumSectionSize(60)
         self._robot_table.currentCellChanged.connect(self._on_table_row)
-        rtl.addWidget(self._robot_table)
+        lay.addWidget(self._robot_table)
 
+        btn_row = QHBoxLayout()
         reload_btn = QPushButton("Reload ipconfig.yaml")
+        reload_btn.setMinimumHeight(36)
         reload_btn.clicked.connect(self._load_robots)
-        rtl.addWidget(reload_btn)
-        c2.addWidget(rt_box)
+        btn_row.addWidget(reload_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
 
-        splitter.addWidget(col2)
+        return page
 
-        # ══════════════════════════════════════════════════════════
-        #  COLUMN 3 — Raw Packet + Packet Log
-        # ══════════════════════════════════════════════════════════
-        col3 = QWidget()
-        c3 = QVBoxLayout(col3)
-        c3.setContentsMargins(4, 4, 4, 4)
-        c3.setSpacing(10)
+    # ── Tab 4: Packet Log ─────────────────────────────────────────
 
-        c3_title = QLabel("Packet Inspector")
-        c3_title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{ACCENT};")
-        c3.addWidget(c3_title)
+    def _build_log_tab(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(8)
 
-        # Raw packet preview
-        raw_box = QGroupBox("Last Packet (raw)")
-        rbl = QVBoxLayout(raw_box)
-        self._raw_label = QLabel("No packets sent yet")
-        self._raw_label.setFont(QFont("Cascadia Code", 11))
-        self._raw_label.setWordWrap(True)
-        self._raw_label.setMinimumHeight(70)
-        self._raw_label.setStyleSheet(
-            f"background:{BG_DARK}; padding:10px; border:1px solid #2a2a4a; "
-            f"border-radius:6px; color:{ACCENT};")
-        self._raw_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        rbl.addWidget(self._raw_label)
-        c3.addWidget(raw_box)
+        lay.addWidget(_heading("Packet Inspector"))
 
-        # Packet log
-        log_box = QGroupBox("Packet Log")
-        lgl = QVBoxLayout(log_box)
-        log_bar = QHBoxLayout()
+        bar = QHBoxLayout()
         self._send_count = QLabel("0 sent")
-        self._send_count.setStyleSheet(f"color:{TEXT_DIM};")
+        self._send_count.setStyleSheet(f"color:{TEXT_DIM}; font-size:13px;")
         self._err_count = QLabel("0 errors")
-        self._err_count.setStyleSheet(f"color:{DANGER};")
-        clear_btn = QPushButton("Clear")
-        clear_btn.setFixedWidth(60)
+        self._err_count.setStyleSheet(f"color:{DANGER}; font-size:13px;")
+        clear_btn = QPushButton("Clear Log")
+        clear_btn.setFixedWidth(80)
         clear_btn.clicked.connect(lambda: (self._log.clear(),
                                            self._reset_counts()))
-        log_bar.addWidget(self._send_count)
-        log_bar.addWidget(self._err_count)
-        log_bar.addStretch()
-        log_bar.addWidget(clear_btn)
-        lgl.addLayout(log_bar)
+        bar.addWidget(self._send_count)
+        bar.addWidget(QLabel("  "))
+        bar.addWidget(self._err_count)
+        bar.addStretch()
+        bar.addWidget(clear_btn)
+        lay.addLayout(bar)
 
         self._log = _LogView()
-        lgl.addWidget(self._log)
-        c3.addWidget(log_box)
+        lay.addWidget(self._log)
 
-        splitter.addWidget(col3)
+        return page
 
-        # ── Splitter proportions ──────────────────────────────────
-        splitter.setStretchFactor(0, 2)  # target + control
-        splitter.setStretchFactor(1, 2)  # quick tests + table
-        splitter.setStretchFactor(2, 3)  # packet log
+    # ── Velocity row factory ──────────────────────────────────────
 
-        root.addWidget(splitter)
-
-        self._n_sent = 0
-        self._n_err = 0
-
-    # ── Slider factory ────────────────────────────────────────────
-
-    def _make_slider(self, label, lo, hi, grid, row):
+    def _make_vel_row(self, label, lo, hi, default, suffix, grid, row):
         lbl = QLabel(label)
-        lbl.setStyleSheet("font-weight:bold;")
+        lbl.setStyleSheet("font-weight:bold; font-size:13px;")
+        lbl.setMinimumWidth(110)
+
         slider = QSlider(Qt.Horizontal)
         slider.setRange(int(lo * 100), int(hi * 100))
-        slider.setValue(0)
+        slider.setValue(int(default * 100))
         slider.setTickPosition(QSlider.TicksBelow)
         slider.setTickInterval(int((hi - lo) * 10))
-        val_lbl = QLabel("0.00")
-        val_lbl.setFixedWidth(50)
-        val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        slider.valueChanged.connect(
-            lambda v, l=val_lbl: l.setText(f"{v / 100:.2f}"))
+        slider.setMinimumWidth(200)
+
+        spin = QDoubleSpinBox()
+        spin.setRange(lo, hi)
+        spin.setValue(default)
+        spin.setDecimals(2)
+        spin.setSingleStep(0.1)
+        spin.setSuffix(f"  {suffix}")
+        spin.setMinimumWidth(130)
+        spin.setMinimumHeight(30)
+        spin.setStyleSheet("font-size:13px;")
 
         reset = QPushButton("0")
-        reset.setFixedSize(24, 24)
-        reset.clicked.connect(lambda: slider.setValue(0))
+        reset.setFixedSize(30, 30)
+        reset.setToolTip("Reset to zero")
+
+        slider.valueChanged.connect(lambda v: spin.setValue(v / 100.0))
+        spin.valueChanged.connect(lambda v: slider.setValue(int(v * 100)))
+        reset.clicked.connect(lambda: (spin.setValue(0), slider.setValue(0)))
 
         grid.addWidget(lbl, row, 0)
         grid.addWidget(slider, row, 1)
-        grid.addWidget(val_lbl, row, 2)
+        grid.addWidget(spin, row, 2)
         grid.addWidget(reset, row, 3)
-        return slider
+
+        return spin, slider
 
     # ── Robot loading ─────────────────────────────────────────────
 
@@ -412,11 +505,10 @@ class TestPanel(QWidget):
                 )
                 self._robots.append(r)
                 self._robot_combo.addItem(
-                    f"{r.label}  (shell {r.shell_id} → {r.ip}:{r.port})")
+                    f"{r.label}  —  shell {r.shell_id}  →  {r.ip}:{r.port}")
 
         self._robot_combo.addItem("— Custom —")
 
-        # Populate table
         self._robot_table.setRowCount(len(self._robots))
         for i, r in enumerate(self._robots):
             color = QColor(YELLOW_TEAM) if r.team == "Yellow" else QColor(BLUE_TEAM)
@@ -427,12 +519,11 @@ class TestPanel(QWidget):
                 item.setTextAlignment(Qt.AlignCenter)
                 if j == 0:
                     item.setForeground(color)
-                    item.setFont(QFont("Segoe UI", 10, QFont.Bold))
+                    item.setFont(QFont("Segoe UI", 11, QFont.Bold))
                 self._robot_table.setItem(i, j, item)
 
         self._log.info(f"Loaded {len(self._robots)} robots from ipconfig.yaml")
 
-        # Set grSim addr from config
         try:
             self._grsim_ip.setText(cfg.grSim_addr[0])
             self._grsim_port.setValue(cfg.grSim_addr[1])
@@ -456,9 +547,9 @@ class TestPanel(QWidget):
     def _build_cmd(self, vx=None, vy=None, w=None, kick=None, dribble=None):
         return RobotCommand(
             robot_id=self._id_spin.value(),
-            vx=vx if vx is not None else self._vx_slider.value() / 100.0,
-            vy=vy if vy is not None else self._vy_slider.value() / 100.0,
-            w=w if w is not None else self._w_slider.value() / 100.0,
+            vx=vx if vx is not None else self._vx_spin.value(),
+            vy=vy if vy is not None else self._vy_spin.value(),
+            w=w if w is not None else self._w_spin.value(),
             kick=kick if kick is not None else int(self._kick_cb.isChecked()),
             dribble=dribble if dribble is not None else int(self._dribble_cb.isChecked()),
             isYellow=(self._team_combo.currentText() == "Yellow"),
@@ -472,11 +563,10 @@ class TestPanel(QWidget):
         raw_text = str(cmd)
 
         self._raw_label.setText(
-            f"To {ip}:{port}\n"
-            f"Raw: {raw_text}\n"
-            f"Bytes: {cmd.encode()!r}")
+            f"<b>To:</b> {ip}:{port}<br>"
+            f"<b>Raw:</b> {raw_text}<br>"
+            f"<b>Bytes:</b> {cmd.encode()!r}")
 
-        # Send to physical robot
         try:
             self._sender.send(cmd, ip, port)
             self._log.ok(
@@ -488,7 +578,6 @@ class TestPanel(QWidget):
             self._log.err(f"SEND FAILED to {ip}:{port} — {e}")
             self._n_err += 1
 
-        # Also send to grSim if checked
         if self._grsim_also.isChecked():
             self._do_grsim_send(cmd)
 
@@ -498,7 +587,6 @@ class TestPanel(QWidget):
         try:
             gs = self._get_grsim()
             gs.send_robot_command(cmd)
-            self._log.ok(f"→ grSim  id={cmd.robot_id}")
             self._n_sent += 1
         except Exception as e:
             self._log.err(f"grSim SEND FAILED — {e}")
@@ -521,12 +609,15 @@ class TestPanel(QWidget):
     def _send_stop(self):
         cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
         self._do_send(cmd)
-        self._vx_slider.setValue(0)
-        self._vy_slider.setValue(0)
-        self._w_slider.setValue(0)
+        self._zero_inputs()
+        self._log.info("STOP sent")
+
+    def _zero_inputs(self):
+        self._vx_spin.setValue(0)
+        self._vy_spin.setValue(0)
+        self._w_spin.setValue(0)
         self._kick_cb.setChecked(False)
         self._dribble_cb.setChecked(False)
-        self._log.info("STOP sent")
 
     def _send_test(self, vx, vy, w, kick, dribble):
         cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
@@ -536,24 +627,23 @@ class TestPanel(QWidget):
         if self._continuous_timer.isActive():
             self._continuous_timer.stop()
             self._cont_btn.setText("Start Continuous (20 Hz)")
-            self._cont_btn.setStyleSheet("")
+            self._cont_btn.setStyleSheet("font-size:14px;")
             self._log.info("Continuous send stopped")
         else:
             self._continuous_timer.start()
             self._cont_btn.setText("STOP Continuous")
             self._cont_btn.setStyleSheet(
-                f"background:{DANGER}; color:#fff; font-weight:bold;")
+                f"background:{DANGER}; color:#fff; font-weight:bold; font-size:14px;")
             self._log.info("Continuous send started at 20 Hz")
 
     def _send_continuous(self):
         self._do_send(self._build_cmd())
 
     def _stop_all(self):
-        """Send stop to every robot in the config."""
         if self._continuous_timer.isActive():
             self._continuous_timer.stop()
             self._cont_btn.setText("Start Continuous (20 Hz)")
-            self._cont_btn.setStyleSheet("")
+            self._cont_btn.setStyleSheet("font-size:14px;")
 
         for r in self._robots:
             cmd = RobotCommand(
@@ -572,23 +662,18 @@ class TestPanel(QWidget):
         self._log.info(f"STOP ALL sent to {len(self._robots)} robots")
 
     def _test_connection(self):
-        """Send a zero-velocity command to verify the path works."""
         ip = self._ip_edit.text().strip()
         port = self._port_spin.value()
         rid = self._id_spin.value()
-
         self._log.info(f"Testing connection to {ip}:{port} (robot {rid})…")
 
         cmd = RobotCommand(robot_id=rid, vx=0, vy=0, w=0, kick=0, dribble=0,
                            isYellow=(self._team_combo.currentText() == "Yellow"))
-
         try:
             self._sender.send(cmd, ip, port)
             self._log.ok(
-                f"Packet sent successfully to {ip}:{port}\n"
-                f"   Raw: {str(cmd)}\n"
-                f"   (no error does NOT confirm robot received it — "
-                f"UDP is fire-and-forget)")
+                f"Packet sent to {ip}:{port} — "
+                f"UDP is fire-and-forget so no receipt confirmation")
             self._n_sent += 1
         except socket.error as e:
             self._log.err(f"SOCKET ERROR: {e}")
@@ -596,24 +681,18 @@ class TestPanel(QWidget):
         except Exception as e:
             self._log.err(f"ERROR: {type(e).__name__}: {e}")
             self._n_err += 1
-
         self._update_counts()
 
     def _test_grsim(self):
-        """Send a spin command to grSim robot 0 yellow."""
         self._log.info("Testing grSim…")
         try:
             gs = self._get_grsim()
-            cmd = RobotCommand(robot_id=0, vx=0, vy=0, w=5.0,
+            cmd = RobotCommand(robot_id=0, vx=0, vy=0, w=1.5,
                                kick=0, dribble=0, isYellow=True)
             gs.send_robot_command(cmd)
             self._log.ok(
-                f"grSim test sent to "
-                f"{self._grsim_ip.text()}:{self._grsim_port.value()} — "
-                f"Yellow robot 0 should spin")
+                f"grSim test sent — Yellow robot 0 should spin for 1s")
             self._n_sent += 1
-
-            # Send stop after 1s
             QTimer.singleShot(1000, lambda: self._grsim_stop_test(gs))
         except Exception as e:
             self._log.err(f"grSim test FAILED: {e}")
@@ -625,11 +704,9 @@ class TestPanel(QWidget):
             cmd = RobotCommand(robot_id=0, vx=0, vy=0, w=0,
                                kick=0, dribble=0, isYellow=True)
             gs.send_robot_command(cmd)
-            self._log.ok("grSim test stop sent")
+            self._log.ok("grSim stop sent")
         except Exception:
             pass
-
-    # ── Counts ────────────────────────────────────────────────────
 
     def _update_counts(self):
         self._send_count.setText(f"{self._n_sent} sent")
