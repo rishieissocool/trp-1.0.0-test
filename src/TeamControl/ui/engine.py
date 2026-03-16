@@ -1,0 +1,301 @@
+"""
+Backend engine — bridges the multiprocessing system with the Qt UI.
+
+Manages process lifecycle, polls the WorldModel, and emits Qt signals
+that drive every widget in the dashboard.
+"""
+
+import time
+import math
+from multiprocessing import Process, Queue, Event
+
+from PySide6.QtCore import QObject, QTimer, Signal
+
+from TeamControl.process_workers.vision_runner import VisionProcess
+from TeamControl.process_workers.gcfsm_runner import GCfsm
+from TeamControl.process_workers.wm_runner import WMWorker
+from TeamControl.world.model_manager import WorldModelManager
+from TeamControl.dispatcher.dispatch import Dispatcher
+from TeamControl.utils.yaml_config import Config
+
+from TeamControl.robot.goalie import run_goalie
+from TeamControl.robot.striker import run_striker
+from TeamControl.robot.navigator import run_navigator, WAYPOINTS_A, WAYPOINTS_B
+from TeamControl.robot.team import run_team
+
+from TeamControl.network.ssl_sockets import grSimSender
+from TeamControl.network.grSimPacketFactory import grSimPacketFactory
+
+
+# ── Snapshot dataclasses ─────────────────────────────────────────────
+
+class RobotSnapshot:
+    __slots__ = ("id", "team", "x", "y", "o", "confidence")
+
+    def __init__(self, rid, team, x, y, o, conf):
+        self.id = rid
+        self.team = team
+        self.x = x
+        self.y = y
+        self.o = o
+        self.confidence = conf
+
+
+class BallSnapshot:
+    __slots__ = ("x", "y")
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+class FrameSnapshot:
+    __slots__ = ("yellow", "blue", "ball", "frame_number")
+
+    def __init__(self):
+        self.yellow: list[RobotSnapshot] = []
+        self.blue: list[RobotSnapshot] = []
+        self.ball: BallSnapshot | None = None
+        self.frame_number: int = 0
+
+
+# ── Engine ───────────────────────────────────────────────────────────
+
+class SimEngine(QObject):
+    """Manages the multiprocessing backend and emits signals for UI."""
+
+    frame_ready = Signal(object)         # FrameSnapshot
+    game_state_ready = Signal(object)    # str | None
+    engine_started = Signal(str)         # mode name
+    engine_stopped = Signal()
+    log_message = Signal(str)            # log line
+
+    MODES = ["goalie", "1v1", "obstacle", "6v6"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._config: Config | None = None
+        self._wm_manager: WorldModelManager | None = None
+        self._wm = None
+        self._is_running: Event | None = None
+        self._bg_procs: list[Process] = []
+        self._fg_procs: list[Process] = []
+        self._vision_q: Queue | None = None
+        self._gc_q: Queue | None = None
+        self._dispatch_q: Queue | None = None
+        self._grsim_sender: grSimSender | None = None
+
+        self._running = False
+        self._mode = ""
+        self._last_version = -1
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(16)  # ~60 fps
+        self._poll_timer.timeout.connect(self._poll)
+
+    # ── Properties ────────────────────────────────────────────────
+
+    @property
+    def is_running(self):
+        return self._running
+
+    @property
+    def current_mode(self):
+        return self._mode
+
+    @property
+    def config(self) -> Config | None:
+        return self._config
+
+    # ── Lifecycle ─────────────────────────────────────────────────
+
+    def reload_config(self):
+        self._config = Config()
+        return self._config
+
+    def start(self, mode: str = "goalie"):
+        if self._running:
+            self.stop()
+
+        self._config = Config()
+        preset = self._config
+
+        self._vision_q = Queue()
+        self._gc_q = Queue()
+        self._dispatch_q = Queue()
+        self._is_running = Event()
+
+        self._wm_manager = WorldModelManager()
+        self._wm_manager.start()
+        self._wm = self._wm_manager.WorldModel()
+
+        self._bg_procs = [
+            Process(target=VisionProcess.run_worker,
+                    args=(self._is_running, None, self._vision_q,
+                          preset.use_grSim_vision, preset.vision[1]),
+                    daemon=True),
+            Process(target=GCfsm.run_worker,
+                    args=(self._is_running, None, self._gc_q,
+                          preset.us_yellow, preset.us_positive),
+                    daemon=True),
+            Process(target=WMWorker.run_worker,
+                    args=(self._is_running, None, self._wm,
+                          self._vision_q, self._gc_q),
+                    daemon=True),
+            Process(target=Dispatcher.run_worker,
+                    args=(self._is_running, None, self._dispatch_q, preset),
+                    daemon=True),
+        ]
+
+        self._fg_procs = self._build_foreground(mode, preset)
+
+        self._is_running.set()
+        for p in self._bg_procs:
+            p.start()
+        for p in self._fg_procs:
+            p.start()
+
+        try:
+            self._grsim_sender = grSimSender(*preset.grSim_addr)
+        except Exception:
+            self._grsim_sender = None
+
+        self._running = True
+        self._mode = mode
+        self._last_version = -1
+        self._poll_timer.start()
+
+        self.engine_started.emit(mode)
+        self.log_message.emit(f"[engine] Started mode: {mode}")
+
+    def stop(self):
+        if not self._running:
+            return
+        self._poll_timer.stop()
+        if self._is_running:
+            self._is_running.clear()
+
+        for p in self._fg_procs:
+            p.join(timeout=3)
+            if p.is_alive():
+                p.terminate()
+        for p in self._bg_procs:
+            p.join(timeout=3)
+            if p.is_alive():
+                p.terminate()
+
+        self._fg_procs.clear()
+        self._bg_procs.clear()
+
+        if self._wm_manager:
+            try:
+                self._wm_manager.shutdown()
+            except Exception:
+                pass
+
+        self._wm = None
+        self._wm_manager = None
+        self._running = False
+        self._mode = ""
+        self._grsim_sender = None
+
+        self.engine_stopped.emit()
+        self.log_message.emit("[engine] Stopped")
+
+    # ── Foreground builder ────────────────────────────────────────
+
+    def _build_foreground(self, mode, preset):
+        procs = []
+        wm = self._wm
+        dq = self._dispatch_q
+        ev = self._is_running
+
+        if mode == "goalie":
+            procs.append(Process(target=run_goalie,
+                                 args=(ev, dq, wm, 4, preset.us_yellow), daemon=True))
+            procs.append(Process(target=run_striker,
+                                 args=(ev, dq, wm, 0, not preset.us_yellow), daemon=True))
+        elif mode == "1v1":
+            procs.append(Process(target=run_striker,
+                                 args=(ev, dq, wm, 0, True), daemon=True))
+            procs.append(Process(target=run_striker,
+                                 args=(ev, dq, wm, 0, False), daemon=True))
+        elif mode == "obstacle":
+            procs.append(Process(target=run_navigator,
+                                 args=(ev, dq, wm, 0, True, WAYPOINTS_A), daemon=True))
+            procs.append(Process(target=run_navigator,
+                                 args=(ev, dq, wm, 1, True, WAYPOINTS_B), daemon=True))
+        elif mode == "6v6":
+            procs.append(Process(target=run_team,
+                                 args=(ev, dq, wm, True, 0), daemon=True))
+            procs.append(Process(target=run_team,
+                                 args=(ev, dq, wm, False, 0), daemon=True))
+        return procs
+
+    # ── Polling ───────────────────────────────────────────────────
+
+    def _poll(self):
+        if not self._wm:
+            return
+        try:
+            frame = self._wm.get_latest_frame()
+            if frame is None:
+                return
+            snap = self._extract_snapshot(frame)
+            self.frame_ready.emit(snap)
+
+            ver = self._wm.get_version()
+            if ver != self._last_version:
+                self._last_version = ver
+                gs = self._wm.get_game_state()
+                self.game_state_ready.emit(gs)
+        except Exception as exc:
+            self.log_message.emit(f"[engine] poll error: {exc}")
+
+    def _extract_snapshot(self, frame) -> FrameSnapshot:
+        snap = FrameSnapshot()
+        snap.frame_number = frame.frame_number
+
+        if frame.robots_yellow:
+            for r in frame.robots_yellow:
+                snap.yellow.append(RobotSnapshot(
+                    r.id, "yellow", r.x, r.y, r.o, r.confidence))
+
+        if frame.robots_blue:
+            for r in frame.robots_blue:
+                snap.blue.append(RobotSnapshot(
+                    r.id, "blue", r.x, r.y, r.o, r.confidence))
+
+        if frame.ball:
+            snap.ball = BallSnapshot(frame.ball.x, frame.ball.y)
+
+        return snap
+
+    # ── Simulation controls ───────────────────────────────────────
+
+    def place_ball(self, x_mm, y_mm, vx=0.0, vy=0.0):
+        if not self._grsim_sender:
+            return
+        try:
+            pkt = grSimPacketFactory.ball_replacement_command(
+                x=x_mm / 1000.0, y=y_mm / 1000.0,
+                vx=vx / 1000.0, vy=vy / 1000.0)
+            self._grsim_sender.send_packet(pkt)
+            self.log_message.emit(f"[sim] Ball placed at ({x_mm:.0f}, {y_mm:.0f})")
+        except Exception as e:
+            self.log_message.emit(f"[sim] Ball placement failed: {e}")
+
+    def place_robot(self, robot_id, is_yellow, x_mm, y_mm, orientation=0.0):
+        if not self._grsim_sender:
+            return
+        try:
+            pkt = grSimPacketFactory.robot_replacement_command(
+                x=x_mm / 1000.0, y=y_mm / 1000.0,
+                orientation=orientation,
+                robot_id=robot_id, isYellow=is_yellow)
+            self._grsim_sender.send_packet(pkt)
+            team = "Yellow" if is_yellow else "Blue"
+            self.log_message.emit(
+                f"[sim] {team} #{robot_id} placed at ({x_mm:.0f}, {y_mm:.0f})")
+        except Exception as e:
+            self.log_message.emit(f"[sim] Robot placement failed: {e}")
