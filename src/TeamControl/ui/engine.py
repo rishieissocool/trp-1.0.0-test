@@ -67,6 +67,7 @@ class SimEngine(QObject):
 
     frame_ready = Signal(object)         # FrameSnapshot
     game_state_ready = Signal(object)    # str | None
+    dispatch_info = Signal(object)       # dict snapshot from dispatcher
     engine_started = Signal(str)         # mode name
     engine_stopped = Signal()
     log_message = Signal(str)            # log line
@@ -84,6 +85,7 @@ class SimEngine(QObject):
         self._vision_q: Queue | None = None
         self._gc_q: Queue | None = None
         self._dispatch_q: Queue | None = None
+        self._dispatch_info_q: Queue | None = None
         self._recv_q: Queue | None = None
         self._grsim_sender: grSimSender | None = None
 
@@ -115,7 +117,7 @@ class SimEngine(QObject):
         self._config = Config()
         return self._config
 
-    def start(self, mode: str = "goalie"):
+    def start(self, mode: str = "goalie", our_id: int = 0, opp_id: int = 0):
         if self._running:
             self.stop()
 
@@ -125,6 +127,7 @@ class SimEngine(QObject):
         self._vision_q = Queue()
         self._gc_q = Queue()
         self._dispatch_q = Queue()
+        self._dispatch_info_q = Queue()
         self._recv_q = Queue()
         self._is_running = Event()
 
@@ -146,14 +149,15 @@ class SimEngine(QObject):
                           self._vision_q, self._gc_q),
                     daemon=True),
             Process(target=Dispatcher.run_worker,
-                    args=(self._is_running, None, self._dispatch_q, preset),
+                    args=(self._is_running, None, self._dispatch_q, preset,
+                          self._dispatch_info_q),
                     daemon=True),
             Process(target=RobotRecv.run_worker,
                     args=(self._is_running, None, self._recv_q),
                     daemon=True),
         ]
 
-        self._fg_procs = self._build_foreground(mode, preset)
+        self._fg_procs = self._build_foreground(mode, preset, our_id, opp_id)
 
         self._is_running.set()
         for p in self._bg_procs:
@@ -202,6 +206,7 @@ class SimEngine(QObject):
         self._wm = None
         self._wm_manager = None
         self._recv_q = None
+        self._dispatch_info_q = None
         self._running = False
         self._mode = ""
         self._grsim_sender = None
@@ -211,32 +216,46 @@ class SimEngine(QObject):
 
     # ── Foreground builder ────────────────────────────────────────
 
-    def _build_foreground(self, mode, preset):
+    def _build_foreground(self, mode, preset, our_id=0, opp_id=0):
         procs = []
         wm = self._wm
         dq = self._dispatch_q
         ev = self._is_running
 
+        self.log_message.emit(
+            f"[engine] Building {mode}: our shell={our_id} "
+            f"({'yellow' if preset.us_yellow else 'blue'}), "
+            f"opp shell={opp_id} "
+            f"({'blue' if preset.us_yellow else 'yellow'})")
+
         if mode == "goalie":
             procs.append(Process(target=run_goalie,
-                                 args=(ev, dq, wm, 4, preset.us_yellow), daemon=True))
+                                 args=(ev, dq, wm, our_id, preset.us_yellow),
+                                 daemon=True))
             procs.append(Process(target=run_striker,
-                                 args=(ev, dq, wm, 0, not preset.us_yellow), daemon=True))
+                                 args=(ev, dq, wm, opp_id, not preset.us_yellow),
+                                 daemon=True))
         elif mode == "1v1":
             procs.append(Process(target=run_striker,
-                                 args=(ev, dq, wm, 0, True), daemon=True))
+                                 args=(ev, dq, wm, our_id, True),
+                                 daemon=True))
             procs.append(Process(target=run_striker,
-                                 args=(ev, dq, wm, 0, False), daemon=True))
+                                 args=(ev, dq, wm, opp_id, False),
+                                 daemon=True))
         elif mode == "obstacle":
             procs.append(Process(target=run_navigator,
-                                 args=(ev, dq, wm, 0, True, WAYPOINTS_A), daemon=True))
+                                 args=(ev, dq, wm, our_id, True, WAYPOINTS_A),
+                                 daemon=True))
             procs.append(Process(target=run_navigator,
-                                 args=(ev, dq, wm, 1, True, WAYPOINTS_B), daemon=True))
+                                 args=(ev, dq, wm, opp_id, True, WAYPOINTS_B),
+                                 daemon=True))
         elif mode == "6v6":
             procs.append(Process(target=run_team,
-                                 args=(ev, dq, wm, True, 0), daemon=True))
+                                 args=(ev, dq, wm, True, our_id),
+                                 daemon=True))
             procs.append(Process(target=run_team,
-                                 args=(ev, dq, wm, False, 0), daemon=True))
+                                 args=(ev, dq, wm, False, opp_id),
+                                 daemon=True))
         return procs
 
     # ── Polling ───────────────────────────────────────────────────
@@ -260,6 +279,19 @@ class SimEngine(QObject):
             self.log_message.emit(f"[engine] poll error: {exc}")
 
         self._drain_recv_queue()
+        self._drain_dispatch_info()
+
+    def _drain_dispatch_info(self):
+        if self._dispatch_info_q is None:
+            return
+        latest = None
+        try:
+            while True:
+                latest = self._dispatch_info_q.get_nowait()
+        except Exception:
+            pass
+        if latest is not None:
+            self.dispatch_info.emit(latest)
 
     def _drain_recv_queue(self):
         """Pull all pending robot responses from the receiver queue."""

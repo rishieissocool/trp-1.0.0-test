@@ -12,7 +12,7 @@ Tabs:
 from PySide6.QtWidgets import (
     QMainWindow, QToolBar, QLabel, QComboBox, QPushButton,
     QTabWidget, QStatusBar, QWidget, QHBoxLayout, QSizePolicy,
-    QApplication,
+    QApplication, QSpinBox,
 )
 from PySide6.QtCore import Qt, QTimer, QPointF
 from PySide6.QtGui import QAction, QFont, QIcon
@@ -24,6 +24,7 @@ from TeamControl.ui.dashboard_page import DashboardPage
 from TeamControl.ui.behavior_tree import BehaviorTreePanel
 from TeamControl.ui.test_panel import TestPanel
 from TeamControl.ui.settings_page import SettingsPage
+from TeamControl.ui.dispatcher_panel import DispatcherPanel
 from TeamControl.ui.log_panel import LogPanel
 
 
@@ -47,6 +48,7 @@ class MainWindow(QMainWindow):
         self._dashboard = DashboardPage(self._field)
         self._bt_panel = BehaviorTreePanel()
         self._test_panel = TestPanel()
+        self._dispatch_panel = DispatcherPanel()
         self._settings = SettingsPage()
         self._log_panel = LogPanel()
 
@@ -57,6 +59,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._dashboard, "  Dashboard  ")
         self._tabs.addTab(self._bt_panel, "  Behavior Tree  ")
         self._tabs.addTab(self._test_panel, "  Hardware Test  ")
+        self._tabs.addTab(self._dispatch_panel, "  Dispatcher  ")
         self._tabs.addTab(self._settings, "  Settings  ")
         self._tabs.addTab(self._log_panel, "  Console  ")
         self.setCentralWidget(self._tabs)
@@ -106,6 +109,23 @@ class MainWindow(QMainWindow):
         self._mode_combo.addItems(SimEngine.MODES)
         self._mode_combo.setMinimumWidth(130)
         tb.addWidget(self._mode_combo)
+        tb.addSeparator()
+
+        tb.addWidget(QLabel("  Our Bot: "))
+        self._our_id_spin = QSpinBox()
+        self._our_id_spin.setRange(0, 15)
+        self._our_id_spin.setValue(0)
+        self._our_id_spin.setToolTip("Shell ID of our robot (from ipconfig.yaml)")
+        self._our_id_spin.setFixedWidth(55)
+        tb.addWidget(self._our_id_spin)
+
+        tb.addWidget(QLabel("  Opp Bot: "))
+        self._opp_id_spin = QSpinBox()
+        self._opp_id_spin.setRange(0, 15)
+        self._opp_id_spin.setValue(0)
+        self._opp_id_spin.setToolTip("Shell ID of opponent robot")
+        self._opp_id_spin.setFixedWidth(55)
+        tb.addWidget(self._opp_id_spin)
         tb.addSeparator()
 
         self._start_btn = QPushButton("  Start  ")
@@ -172,7 +192,8 @@ class MainWindow(QMainWindow):
         view_menu.addAction("Reset Field View", self._reset_field_view)
         view_menu.addSeparator()
         for i, name in enumerate(["Dashboard", "Behavior Tree",
-                                   "Hardware Test", "Settings", "Console"]):
+                                   "Hardware Test", "Dispatcher",
+                                   "Settings", "Console"]):
             view_menu.addAction(
                 name, lambda checked=False, idx=i: self._tabs.setCurrentIndex(idx))
 
@@ -206,6 +227,7 @@ class MainWindow(QMainWindow):
 
         eng.frame_ready.connect(self._on_frame)
         eng.game_state_ready.connect(self._dashboard.update_game_state)
+        eng.dispatch_info.connect(self._dispatch_panel.update_info)
         eng.engine_started.connect(self._on_engine_started)
         eng.engine_stopped.connect(self._on_engine_stopped)
         eng.log_message.connect(self._log_panel.append)
@@ -234,9 +256,12 @@ class MainWindow(QMainWindow):
 
     def _on_start(self):
         mode = self._mode_combo.currentText()
-        self._log_panel.append(f"[engine] Starting {mode}…")
+        our_id = self._our_id_spin.value()
+        opp_id = self._opp_id_spin.value()
+        self._log_panel.append(
+            f"[engine] Starting {mode} — our bot #{our_id}, opp bot #{opp_id}")
         try:
-            self._engine.start(mode)
+            self._engine.start(mode, our_id=our_id, opp_id=opp_id)
         except Exception as e:
             self._log_panel.append(f"[error] Failed to start: {e}")
 
@@ -249,26 +274,34 @@ class MainWindow(QMainWindow):
         self._mode_combo.setCurrentIndex(idx)
         if self._engine.is_running:
             self._engine.stop()
-        self._engine.start(mode)
+        self._engine.start(mode,
+                           our_id=self._our_id_spin.value(),
+                           opp_id=self._opp_id_spin.value())
 
     def _on_engine_started(self, mode):
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._mode_combo.setEnabled(False)
+        self._our_id_spin.setEnabled(False)
+        self._opp_id_spin.setEnabled(False)
         self._state_label.setText(f"  RUNNING — {mode.upper()}  ")
         self._state_label.setStyleSheet(f"color:{SUCCESS}; font-weight:bold;")
         self._status_mode.setText(f"Mode: {mode}")
         self._dashboard.set_mode(mode)
         self._dashboard.set_engine_running(True)
+        self._dispatch_panel.set_running(True)
 
     def _on_engine_stopped(self):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._mode_combo.setEnabled(True)
+        self._our_id_spin.setEnabled(True)
+        self._opp_id_spin.setEnabled(True)
         self._state_label.setText("  IDLE  ")
         self._state_label.setStyleSheet(f"color:{TEXT_DIM};")
         self._status_mode.setText("Mode: —")
         self._dashboard.set_engine_running(False)
+        self._dispatch_panel.set_running(False)
 
     def _on_frame(self, snap):
         self._dashboard.update_frame(snap)

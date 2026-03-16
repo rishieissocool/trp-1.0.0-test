@@ -17,15 +17,21 @@ except ImportError as e:
 class Dispatcher(BaseWorker):
     def __init__(self,is_running:Event ,logger:LogSaver, ):
         super().__init__(is_running,logger)
-        self.last_sent_time = time.time()
+        self._last_sent_per_robot = {}
+        self._send_counts = {}
         self.running_commands = {}
+        self._info_q = None
+        self._last_info_time = 0
         
     
     def setup(self,*args):
         """
-        takes dispatcher_q and preset_config
+        takes dispatcher_q, preset_config, and optional info_q
         """
-        q,config  = args
+        if len(args) >= 3:
+            q, config, self._info_q = args[0], args[1], args[2]
+        else:
+            q, config = args[0], args[1]
         self.q = q
         self.send_to_grSim = config.send_to_grSim
         self.yellow = config.yellow
@@ -69,6 +75,7 @@ class Dispatcher(BaseWorker):
         now = time.time()
         self.handle_commands(now)
         self.check_command_timeout(now)
+        self._publish_info(now)
     
         
     def shutdown(self):
@@ -131,25 +138,62 @@ class Dispatcher(BaseWorker):
             self.send_command(command, now)
 
     def send_command(self, command:RobotCommand, now=None):
-        # this handles how you'd use different senders to send a command.
         if now is None:
             now = time.time()
         shell_id = command.robot_id
         isYellow = command.isYellow
         robot_dict = self.get_dict_from_shell(shell_id,isYellow)
-        # print(robot_dict["ip"],robot_dict["port"])
+
         if self.send_to_grSim is True:
             self.g_sender.send_robot_command(command,override_id=robot_dict["grSimID"])
-            # print(f" RobotCommand has been sent to grSim : {robot_dict['grSimID']=} " )
-        # print (f"diff {self.last_sent_time + 0.001} < {str(time.time())}")
 
-        if self.last_sent_time + 0.05 < now:
+        key = (shell_id, isYellow)
+        last = self._last_sent_per_robot.get(key, 0)
+        if last + 0.05 < now:
             self.r_sender.send(command,robot_dict["ip"],robot_dict["port"])
-
-            # print(f"Robot Command {shell_id} sent to  @ {robot_dict['ip'],robot_dict['port']}")
-            self.last_sent_time = now
+            self._last_sent_per_robot[key] = now
+            self._send_counts[key] = self._send_counts.get(key, 0) + 1
 
     
+    def _publish_info(self, now):
+        if self._info_q is None or now - self._last_info_time < 0.25:
+            return
+        self._last_info_time = now
+        try:
+            cmds = {}
+            for rid, pkt in self.running_commands.items():
+                cmd = pkt["command"]
+                elapsed = now - pkt["start_time"]
+                key = (cmd.robot_id, cmd.isYellow)
+                cmds[rid] = {
+                    "robot_id": cmd.robot_id,
+                    "isYellow": pkt["isYellow"],
+                    "vx": round(cmd.vx, 3),
+                    "vy": round(cmd.vy, 3),
+                    "w": round(cmd.w, 3),
+                    "kick": cmd.kick,
+                    "dribble": cmd.dribble,
+                    "runtime": round(pkt["runtime"], 2),
+                    "elapsed": round(elapsed, 2),
+                    "ip": self.get_dict_from_shell(cmd.robot_id, cmd.isYellow).get("ip", "?"),
+                    "port": self.get_dict_from_shell(cmd.robot_id, cmd.isYellow).get("port", 0),
+                    "sends": self._send_counts.get(key, 0),
+                }
+            info = {
+                "commands": cmds,
+                "send_to_grSim": self.send_to_grSim,
+                "queue_size": self.q.qsize() if hasattr(self.q, "qsize") else -1,
+                "yellow_shells": {sid: {"ip": d.get("ip"), "port": d.get("port"),
+                                        "grSimID": d.get("grSimID")}
+                                  for sid, d in self._yellow_shell_cache.items()},
+                "blue_shells": {sid: {"ip": d.get("ip"), "port": d.get("port"),
+                                      "grSimID": d.get("grSimID")}
+                                for sid, d in self._blue_shell_cache.items()},
+            }
+            self._info_q.put_nowait(info)
+        except Exception:
+            pass
+
     def get_dict_from_shell(self,shell_id,isYellow) -> str:
         cache = self._yellow_shell_cache if isYellow is True else self._blue_shell_cache
         try:
