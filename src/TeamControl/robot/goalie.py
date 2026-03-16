@@ -15,66 +15,17 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
-
-# ═══════════════════════════════════════════════════════════════════
-#  FIELD GEOMETRY (mm) — small field 5000 x 3000
-# ═══════════════════════════════════════════════════════════════════
-
-FIELD_LENGTH = 5000
-FIELD_WIDTH = 3000
-HALF_LEN = FIELD_LENGTH / 2
-HALF_WID = FIELD_WIDTH / 2
-GOAL_WIDTH = 1000
-GOAL_HW = GOAL_WIDTH / 2
-
-# How far goalie will come off the line to narrow the angle
-MAX_ADVANCE = 1100
-
-# Defense area
-DEFENSE_DEPTH = 1200
-DEFENSE_HALF_WIDTH = 1200
-
-# ═══════════════════════════════════════════════════════════════════
-#  SPEEDS (m/s) — full speed, no throttle
-# ═══════════════════════════════════════════════════════════════════
-
-SAVE_SPEED = 2.5            # maximum urgency for shot saves
-POSITION_SPEED = 1.6        # angle narrowing movement
-CLEAR_SPEED = 1.4           # going to clear a dead ball
-RETREAT_SPEED = 2.0         # returning to goal quickly
-DISTRIBUTE_SPEED = 1.2      # dribbling to pass position
-
-# ═══════════════════════════════════════════════════════════════════
-#  ANGULAR
-# ═══════════════════════════════════════════════════════════════════
-
-MAX_W = 1.0
-FACE_BALL_GAIN = 1.5
-
-# ═══════════════════════════════════════════════════════════════════
-#  THRESHOLDS
-# ═══════════════════════════════════════════════════════════════════
-
-SHOT_SPEED = 500            # mm/s — lower = detect shots earlier
-CLEAR_BALL_SPEED = 450      # mm/s — slower = clearable
-CLEAR_BALL_DIST = 1100      # mm — go clear if this close
-KICK_DIST = 175
-DANGER_ZONE = HALF_LEN      # mm — ball in our half = be ready
-PASS_CLEAR = 400            # mm — clearance for distribution pass lane
-
-# ═══════════════════════════════════════════════════════════════════
-#  BALL PHYSICS
-# ═══════════════════════════════════════════════════════════════════
-
-FRICTION = 0.4
-BALL_HISTORY_SIZE = 7
-
-# ═══════════════════════════════════════════════════════════════════
-#  TIMING
-# ═══════════════════════════════════════════════════════════════════
-
-LOOP_RATE = 0.016
-FRAME_INTERVAL = 0.04
+from TeamControl.robot.constants import (
+    FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
+    GOAL_WIDTH, GOAL_HW, MAX_ADVANCE,
+    DEFENSE_DEPTH, DEFENSE_HALF_WIDTH,
+    SAVE_SPEED, POSITION_SPEED, CLEAR_SPEED, RETREAT_SPEED, DISTRIBUTE_SPEED,
+    MAX_W, FACE_BALL_GAIN,
+    SHOT_SPEED, CLEAR_BALL_SPEED, CLEAR_BALL_DIST, KICK_DIST,
+    DANGER_ZONE, PASS_CLEAR,
+    FRICTION, BALL_HISTORY_SIZE,
+    LOOP_RATE, FRAME_INTERVAL,
+)
 
 
 def _clamp(v, lo, hi):

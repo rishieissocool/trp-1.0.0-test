@@ -21,19 +21,11 @@ from TeamControl.ui.theme import (FIELD_GREEN, FIELD_LINE, YELLOW_TEAM,
                                    BLUE_TEAM, BALL_COLOR, BG_DARK, ACCENT,
                                    ROLE_GOALIE, ROLE_ATTACKER, ROLE_SUPPORT,
                                    ROLE_DEFENDER, TEXT)
-
-# ── SSL field geometry (mm, small field 5000×3000) ───────────────────
-FIELD_LENGTH  = 5000.0
-FIELD_WIDTH   = 3000.0
-HALF_LEN      = FIELD_LENGTH / 2
-HALF_WID      = FIELD_WIDTH / 2
-MARGIN        = 300.0
-PENALTY_DEPTH = 1000.0
-PENALTY_WIDTH = 2000.0
-CENTER_RADIUS = 500.0
-GOAL_DEPTH    = 180.0
-GOAL_WIDTH    = 1000.0
-ROBOT_RADIUS  = 90.0
+from TeamControl.robot.constants import (
+    FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
+    PENALTY_DEPTH, PENALTY_WIDTH, CENTER_RADIUS,
+    GOAL_DEPTH, GOAL_WIDTH, ROBOT_RADIUS, FIELD_MARGIN as MARGIN,
+)
 
 
 class FieldCanvas(QWidget):

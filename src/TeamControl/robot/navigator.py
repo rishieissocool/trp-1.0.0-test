@@ -13,34 +13,20 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
+from TeamControl.robot.constants import (
+    FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
+    CRUISE_SPEED, SPRINT_SPEED, MAX_W, TURN_GAIN,
+    LOOP_RATE, FRAME_INTERVAL,
+)
 
-# Field (mm) — small field 5000 x 3000
-FIELD_LENGTH = 5000
-FIELD_WIDTH = 3000
-HALF_LEN = FIELD_LENGTH / 2
-HALF_WID = FIELD_WIDTH / 2
-
-# Speeds (m/s) — full speed
-CRUISE_SPEED = 2.0
 AVOID_SPEED = 1.4
-SPRINT_SPEED = 2.3
 
-# Angular (rad/s)
-MAX_W = 1.0
-TURN_GAIN = 1.5
+WAYPOINT_RADIUS = 180
+LOOKAHEAD_RADIUS = 600
 
-# Waypoint navigation
-WAYPOINT_RADIUS = 180       # mm — close enough to advance
-LOOKAHEAD_RADIUS = 600      # mm — skip waypoints if next is visible
-
-# Obstacle avoidance
-AVOID_DIST = 700            # mm — start steering away
-AVOID_STRENGTH = 1.8        # repulsive force multiplier
-AVOID_CRITICAL = 350        # mm — emergency hard avoidance
-
-# Timing
-LOOP_RATE = 0.016
-FRAME_INTERVAL = 0.04
+AVOID_DIST = 700
+AVOID_STRENGTH = 1.8
+AVOID_CRITICAL = 350
 
 # Default patrol routes
 WAYPOINTS_A = [

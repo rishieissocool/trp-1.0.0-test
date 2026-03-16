@@ -15,73 +15,16 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
-
-# ═══════════════════════════════════════════════════════════════════
-#  FIELD GEOMETRY (mm) — small field 5000 x 3000
-# ═══════════════════════════════════════════════════════════════════
-
-FIELD_LENGTH = 5000
-FIELD_WIDTH = 3000
-HALF_LEN = FIELD_LENGTH / 2
-HALF_WID = FIELD_WIDTH / 2
-GOAL_WIDTH = 1000
-GOAL_HW = GOAL_WIDTH / 2
-
-# Defense area — striker must not enter the opponent's box
-DEFENSE_DEPTH = 1200
-DEFENSE_HALF_WIDTH = 1200
-
-# ═══════════════════════════════════════════════════════════════════
-#  DISTANCES (mm)
-# ═══════════════════════════════════════════════════════════════════
-
-BEHIND_DIST = 300           # how far behind ball to line up
-KICK_RANGE = 175            # trigger kick distance
-BALL_NEAR = 420             # "close to ball" threshold
-AVOID_RADIUS = 400          # how wide to swing around the ball
-
-# ═══════════════════════════════════════════════════════════════════
-#  SPEEDS (m/s) — full speed, no artificial throttle
-# ═══════════════════════════════════════════════════════════════════
-
-SPRINT_SPEED = 2.2          # max speed for long-range repositioning
-CRUISE_SPEED = 1.8          # medium distance approach
-CHARGE_SPEED = 1.4          # close-range approach
-DRIBBLE_SPEED = 1.0         # precise control near ball
-ONETOUCH_SPEED = 1.6        # speed for one-touch redirect
-
-# ═══════════════════════════════════════════════════════════════════
-#  ANGULAR
-# ═══════════════════════════════════════════════════════════════════
-
-MAX_W = 1.0
-TURN_GAIN = 1.5
-
-# ═══════════════════════════════════════════════════════════════════
-#  TIMING
-# ═══════════════════════════════════════════════════════════════════
-
-KICK_COOLDOWN = 0.22
-LOOP_RATE = 0.016
-FRAME_INTERVAL = 0.04
-
-# ═══════════════════════════════════════════════════════════════════
-#  BALL PHYSICS
-# ═══════════════════════════════════════════════════════════════════
-
-BALL_HISTORY_SIZE = 6
-FRICTION = 0.4              # friction deceleration factor per second
-INTERCEPT_MAX_T = 1.0       # max seconds to predict ahead
-INTERCEPT_STEPS = 12        # number of prediction steps
-BALL_MOVING_THRESH = 150    # mm/s — ball considered moving
-
-# ═══════════════════════════════════════════════════════════════════
-#  TACTICAL
-# ═══════════════════════════════════════════════════════════════════
-
-PRESSURE_DIST = 500         # opponent this close = under pressure
-ONETOUCH_MIN_SPEED = 300    # ball must be moving this fast for one-touch
-ONETOUCH_ANGLE = 0.8        # max angle offset for one-touch redirect
+from TeamControl.robot.constants import (
+    FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
+    GOAL_WIDTH, GOAL_HW, DEFENSE_DEPTH, DEFENSE_HALF_WIDTH,
+    BEHIND_DIST, KICK_RANGE, BALL_NEAR, AVOID_RADIUS,
+    SPRINT_SPEED, CRUISE_SPEED, CHARGE_SPEED, DRIBBLE_SPEED, ONETOUCH_SPEED,
+    MAX_W, TURN_GAIN,
+    KICK_COOLDOWN, LOOP_RATE, FRAME_INTERVAL,
+    BALL_HISTORY_SIZE, FRICTION, INTERCEPT_MAX_T, INTERCEPT_STEPS,
+    BALL_MOVING_THRESH, PRESSURE_DIST, ONETOUCH_MIN_SPEED, ONETOUCH_ANGLE,
+)
 
 
 def _clamp(v, lo, hi):

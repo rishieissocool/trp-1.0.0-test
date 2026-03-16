@@ -23,26 +23,42 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
-
+from TeamControl.robot.constants import (
+    FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
+    GOAL_WIDTH, GOAL_HW,
+    DEFENSE_DEPTH, DEFENSE_HALF_WIDTH,
+    MAX_W, TURN_GAIN,
+    KICK_RANGE, BALL_NEAR, BEHIND_DIST, AVOID_RADIUS,
+    FRICTION, INTERCEPT_STEPS,
+    PRESSURE_DIST, KICK_COOLDOWN, BALL_HISTORY_SIZE,
+    MAX_ADVANCE, SHOT_SPEED, CLEAR_BALL_SPEED, CLEAR_BALL_DIST,
+    LOOP_RATE, FRAME_INTERVAL,
+)
 
 # ════════════════════════════════════════════════════════════════════
-#  FIELD GEOMETRY  (mm) — small field 5000 x 3000
+#  ALIASES (team.py naming convention → central constants)
 # ════════════════════════════════════════════════════════════════════
 
-FIELD_LEN    = 5000
-FIELD_WID    = 3000
-HALF_LEN     = FIELD_LEN / 2       # 2500
-HALF_WID     = FIELD_WID / 2       # 1500
-GOAL_W       = 1000
-GOAL_HW      = GOAL_W / 2
-DEF_DEPTH    = 1200
-DEF_HW       = 1200
+FIELD_LEN    = FIELD_LENGTH
+FIELD_WID    = FIELD_WIDTH
+GOAL_W       = GOAL_WIDTH
+DEF_DEPTH    = DEFENSE_DEPTH
+DEF_HW       = DEFENSE_HALF_WIDTH
+AVOID_R      = AVOID_RADIUS
+LOOP_DT      = LOOP_RATE
+FRAME_DT     = FRAME_INTERVAL
+BHIST_N      = BALL_HISTORY_SIZE
+GK_MAX_ADV   = MAX_ADVANCE
+GK_SHOT_SPEED  = int(SHOT_SPEED)
+GK_CLEAR_SPEED = int(CLEAR_BALL_SPEED)
+GK_CLEAR_DIST  = int(CLEAR_BALL_DIST)
+
 DEF_MARGIN   = 200
 DEF_MARGIN_D = 450
 FIELD_MARGIN = 180
 
 # ════════════════════════════════════════════════════════════════════
-#  SPEEDS  (m/s) — full speed, no artificial throttle
+#  SPEEDS  (m/s) — team-specific role speeds
 # ════════════════════════════════════════════════════════════════════
 
 SPD_SPRINT   = 2.5
@@ -53,32 +69,15 @@ SPD_POSSESS  = 1.6
 SPD_POSITION = 1.5
 SPD_SAVE     = 2.5
 SPD_CLEAR    = 1.4
-SPD_COUNTER  = 2.3          # counter-attack sprint speed
-SPD_PRESS    = 2.0          # pressing speed
+SPD_COUNTER  = 2.3
+SPD_PRESS    = 2.0
 
 # ════════════════════════════════════════════════════════════════════
-#  ANGULAR
+#  BALL PHYSICS (team-specific extras)
 # ════════════════════════════════════════════════════════════════════
 
-MAX_W       = 1.0
-TURN_GAIN   = 1.5
-
-# ════════════════════════════════════════════════════════════════════
-#  BALL INTERACTION  (mm)
-# ════════════════════════════════════════════════════════════════════
-
-KICK_RANGE   = 175
-BEHIND_DIST  = 270
-BALL_NEAR    = 420
-AVOID_R      = 420
-
-# ════════════════════════════════════════════════════════════════════
-#  BALL PHYSICS
-# ════════════════════════════════════════════════════════════════════
-
-PREDICT_STEPS = 12
+PREDICT_STEPS = INTERCEPT_STEPS
 PREDICT_DT    = 0.10
-FRICTION      = 0.40
 BALL_STOP_V   = 50
 
 # ════════════════════════════════════════════════════════════════════
@@ -91,7 +90,6 @@ INTERCEPT_MARGIN  = 0.05
 MAX_ROBOT_SPD     = 2400
 RECV_MARKED_DIST  = 380
 MAX_SHOT_DIST     = 4200
-PRESSURE_DIST     = 500
 HAS_SPACE_DIST    = 800
 
 SHOOT_THRESH      = 0.16
@@ -107,36 +105,20 @@ DEFEND_MARK_RATIO = 0.48
 WINNER_HYST       = 0.25
 POSSESS_DIST      = 500
 
-# Counter-attack
-COUNTER_WINDOW    = 2.0     # seconds after gaining possession to be in counter mode
-COUNTER_ADVANCE   = 1800    # mm ahead of ball for counter runners
+COUNTER_WINDOW    = 2.0
+COUNTER_ADVANCE   = 1800
 
-# Pressing
-PRESS_ZONE        = 0.3     # ball in opponent's 30% of field → press
-PRESS_DIST        = 600     # second presser stays this far from first
+PRESS_ZONE        = 0.3
+PRESS_DIST        = 600
 
-# Through-ball
-THROUGH_LEAD      = 800     # mm ahead of teammate's position for through ball
+THROUGH_LEAD      = 800
 
 # ════════════════════════════════════════════════════════════════════
-#  GOALIE
+#  GOALIE (team-specific extras)
 # ════════════════════════════════════════════════════════════════════
 
-GK_MAX_ADV     = 1100
-GK_SHOT_SPEED  = 480
-GK_CLEAR_SPEED = 450
-GK_CLEAR_DIST  = 1100
 GK_DANGER      = 2500
 GK_PASS_CLR    = 450
-
-# ════════════════════════════════════════════════════════════════════
-#  TIMING
-# ════════════════════════════════════════════════════════════════════
-
-LOOP_DT        = 0.016
-FRAME_DT       = 0.04
-KICK_COOLDOWN  = 0.24
-BHIST_N        = 7
 
 
 # ════════════════════════════════════════════════════════════════════
