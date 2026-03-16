@@ -26,8 +26,8 @@ AVOID_SPEED = 1.4
 SPRINT_SPEED = 2.3
 
 # Angular (rad/s)
-MAX_W = 9.0
-TURN_GAIN = 6.5
+MAX_W = 1.0
+TURN_GAIN = 1.5
 
 # Waypoint navigation
 WAYPOINT_RADIUS = 180       # mm — close enough to advance

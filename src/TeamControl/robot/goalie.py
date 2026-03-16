@@ -48,8 +48,8 @@ DISTRIBUTE_SPEED = 1.2      # dribbling to pass position
 #  ANGULAR
 # ═══════════════════════════════════════════════════════════════════
 
-MAX_W = 9.0
-FACE_BALL_GAIN = 6.0
+MAX_W = 1.0
+FACE_BALL_GAIN = 1.5
 
 # ═══════════════════════════════════════════════════════════════════
 #  THRESHOLDS
