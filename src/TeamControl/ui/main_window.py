@@ -31,6 +31,7 @@ from TeamControl.ui.config_panel import ConfigPanel
 from TeamControl.ui.log_panel import LogPanel
 from TeamControl.ui.sim_panel import SimPanel
 from TeamControl.ui.network_panel import NetworkPanel
+from TeamControl.ui.test_panel import TestPanel
 
 
 class MainWindow(QMainWindow):
@@ -55,11 +56,13 @@ class MainWindow(QMainWindow):
         self._log_panel = LogPanel()
         self._sim_panel = SimPanel()
         self._network_panel = NetworkPanel()
+        self._test_panel = TestPanel()
 
-        # ── Top-level tabs: Field view vs Behavior Tree ──────────
+        # ── Top-level tabs: Field / Behavior Tree / Hardware Test ─
         self._central_tabs = QTabWidget()
         self._central_tabs.addTab(self._field, "Field")
         self._central_tabs.addTab(self._bt_panel, "Behavior Tree")
+        self._central_tabs.addTab(self._test_panel, "Hardware Test")
         self.setCentralWidget(self._central_tabs)
 
         # ── Toolbar ───────────────────────────────────────────────
