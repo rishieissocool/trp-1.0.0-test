@@ -67,7 +67,7 @@ blue:
     has_chip_kick: false
 
   D:
-    ip: "127.0.0.1"
+    ip: "192.168.1.4"
     port: 50514
     grSimID : 3
     shellID : 3 
@@ -104,7 +104,7 @@ network:
   robot_ip: "192.168.1.2"
   vision_ip: "192.168.1.2"
 
-use_grSim_vision: true
+use_grSim_vision: false
 us_yellow: true
 us_positive: us_yellow
 send_to_grSim: true
