@@ -142,7 +142,6 @@ class TestPanel(QWidget):
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
         tabs.addTab(self._build_drive_tab(), "Connect && Drive")
-        tabs.addTab(self._build_quick_tab(), "Quick Tests")
         tabs.addTab(self._build_tuning_tab(), "Tuning")
         tabs.addTab(self._build_robots_tab(), "Robots")
         tabs.addTab(self._build_log_tab(), "Packet Log")
@@ -327,147 +326,54 @@ class TestPanel(QWidget):
         self._raw_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         right.addWidget(self._raw_label)
 
-        right.addStretch()
-        outer.addLayout(right, 1)
+        # ── Actions (right-click on field triggers these) ────────────
+        right.addWidget(_sep())
+        right.addWidget(_heading("Actions"))
 
-        return page
+        act_grid = QGridLayout()
+        act_grid.setSpacing(8)
 
-    # ── Tab 2: Quick Tests ────────────────────────────────────────
-
-    def _build_quick_tab(self):
-        page = QWidget()
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(12)
-
-        lay.addWidget(_heading("One-Click Movement Tests"))
-        lay.addWidget(QLabel(
-            "Each button sends a single command to the currently selected robot. "
-            "Make sure you've picked a target on the Connect & Drive tab first."))
-
-        tests = [
-            ("Spin CW",        0.0,  0.0,   1.5, 0, 0, "Rotate clockwise at 1.5 rad/s"),
-            ("Spin CCW",       0.0,  0.0,  -1.5, 0, 0, "Rotate counter-clockwise at 1.5 rad/s"),
-            ("Drive Forward",  1.0,  0.0,   0.0, 0, 0, "Move forward at 1 m/s"),
-            ("Drive Back",    -1.0,  0.0,   0.0, 0, 0, "Move backward at 1 m/s"),
-            ("Strafe Left",    0.0,  1.0,   0.0, 0, 0, "Strafe left at 1 m/s"),
-            ("Strafe Right",   0.0, -1.0,   0.0, 0, 0, "Strafe right at 1 m/s"),
-            ("Slow Forward",   0.3,  0.0,   0.0, 0, 0, "Crawl forward at 0.3 m/s"),
-            ("Fast Forward",   2.5,  0.0,   0.0, 0, 0, "Sprint forward at 2.5 m/s"),
-            ("Diagonal FL",    1.0,  1.0,   0.0, 0, 0, "Move diagonally forward-left"),
-            ("Diagonal FR",    1.0, -1.0,   0.0, 0, 0, "Move diagonally forward-right"),
-            ("Arc Left",       1.0,  0.0,   1.0, 0, 0, "Drive forward while turning left"),
-            ("Arc Right",      1.0,  0.0,  -1.0, 0, 0, "Drive forward while turning right"),
-            ("Kick",           0.0,  0.0,   0.0, 1, 0, "Fire kicker"),
-            ("Dribble",        0.0,  0.0,   0.0, 0, 1, "Activate dribbler/spinner"),
-            ("Kick + Forward", 1.0,  0.0,   0.0, 1, 0, "Drive forward and kick"),
-            ("Full Send",      2.0,  0.0,   0.0, 1, 1, "Full speed + kick + dribble"),
-        ]
-
-        grid = QGridLayout()
-        grid.setSpacing(8)
-        cols = 4
-        for i, (name, vx, vy, w, k, d, tip) in enumerate(tests):
-            btn = QPushButton(name)
-            btn.setMinimumHeight(48)
-            btn.setMinimumWidth(140)
-            btn.setToolTip(f"{tip}\nvx={vx}  vy={vy}  w={w}  kick={k}  dribble={d}")
-            btn.setStyleSheet("font-size:13px;")
-            btn.clicked.connect(
-                lambda checked=False, vx=vx, vy=vy, w=w, k=k, d=d:
-                    self._send_test(vx, vy, w, k, d))
-            grid.addWidget(btn, i // cols, i % cols)
-        lay.addLayout(grid)
-
-        lay.addWidget(_sep())
-        lay.addWidget(_heading("Action Tests (require engine running)"))
-        lay.addWidget(QLabel(
-            "These run continuously using vision data. "
-            "Start the engine first, then click an action. Click STOP to cancel."))
-
-        action_row = QHBoxLayout()
-        action_row.setSpacing(8)
-
-        go_ball_btn = QPushButton("Go to Ball")
-        go_ball_btn.setMinimumHeight(48)
-        go_ball_btn.setMinimumWidth(160)
-        go_ball_btn.setToolTip("Drive to the ball using vision feedback (continuous)")
-        go_ball_btn.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT};")
-        go_ball_btn.clicked.connect(lambda: self._start_action("go_to_ball"))
-        action_row.addWidget(go_ball_btn)
-
-        go_ball_kick_btn = QPushButton("Go to Ball && Kick")
-        go_ball_kick_btn.setMinimumHeight(48)
-        go_ball_kick_btn.setMinimumWidth(160)
-        go_ball_kick_btn.setToolTip("Drive to ball, face goal, then kick (continuous)")
-        go_ball_kick_btn.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT};")
-        go_ball_kick_btn.clicked.connect(lambda: self._start_action("go_to_ball_kick"))
-        action_row.addWidget(go_ball_kick_btn)
-
-        square_btn = QPushButton("Draw Square")
-        square_btn.setMinimumHeight(48)
-        square_btn.setMinimumWidth(160)
-        square_btn.setToolTip("Drive in a square pattern within the field")
-        square_btn.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT};")
-        square_btn.clicked.connect(lambda: self._start_action("draw_square"))
-        action_row.addWidget(square_btn)
-
-        lay.addLayout(action_row)
-
-        self._action_status = QLabel("")
-        self._action_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:12px; padding:4px;")
-        lay.addWidget(self._action_status)
-
-        lay.addWidget(_sep())
-        lay.addWidget(_heading("Go to Point"))
-        lay.addWidget(QLabel(
-            "Set a velocity factor, then click Pick Point and click on the field."))
-
-        goto_row = QHBoxLayout()
-        goto_row.setSpacing(8)
-
-        goto_row.addWidget(QLabel("Velocity:"))
+        act_grid.addWidget(QLabel("Go-to velocity:"), 0, 0)
         self._goto_vel_spin = QDoubleSpinBox()
         self._goto_vel_spin.setRange(0.05, 2.0)
         self._goto_vel_spin.setValue(0.2)
         self._goto_vel_spin.setSingleStep(0.05)
         self._goto_vel_spin.setSuffix("  m/s")
         self._goto_vel_spin.setMinimumWidth(120)
-        goto_row.addWidget(self._goto_vel_spin)
+        act_grid.addWidget(self._goto_vel_spin, 0, 1)
 
-        pick_btn = QPushButton("Pick Point on Field")
-        pick_btn.setMinimumHeight(44)
-        pick_btn.setMinimumWidth(180)
-        pick_btn.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT};")
-        pick_btn.setToolTip("Click this, then click a point on the Dashboard field view")
-        pick_btn.clicked.connect(self._pick_goto_point)
-        goto_row.addWidget(pick_btn)
+        right.addLayout(act_grid)
 
-        lay.addLayout(goto_row)
+        self._action_status = QLabel("")
+        self._action_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:12px; padding:4px;")
+        right.addWidget(self._action_status)
 
         self._goto_status = QLabel("")
         self._goto_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:12px; padding:4px;")
-        lay.addWidget(self._goto_status)
-
-        lay.addWidget(_sep())
+        right.addWidget(self._goto_status)
 
         stop_row = QHBoxLayout()
-        stop_btn = QPushButton("STOP SELECTED ROBOT")
+        stop_row.setSpacing(8)
+
+        stop_btn = QPushButton("STOP")
         stop_btn.setObjectName("stopBtn")
-        stop_btn.setMinimumHeight(50)
-        stop_btn.setStyleSheet("font-size:15px;")
+        stop_btn.setMinimumHeight(40)
+        stop_btn.setStyleSheet("font-size:14px;")
         stop_btn.clicked.connect(self._send_stop)
         stop_row.addWidget(stop_btn)
 
-        stop_all = QPushButton("STOP ALL ROBOTS")
+        stop_all = QPushButton("STOP ALL")
         stop_all.setObjectName("stopBtn")
-        stop_all.setMinimumHeight(50)
-        stop_all.setStyleSheet("font-size:15px;")
+        stop_all.setMinimumHeight(40)
+        stop_all.setStyleSheet("font-size:14px;")
         stop_all.clicked.connect(self._stop_all)
         stop_row.addWidget(stop_all)
-        lay.addLayout(stop_row)
 
-        lay.addStretch()
+        right.addLayout(stop_row)
+
+        right.addStretch()
+        outer.addLayout(right, 1)
+
         return page
 
     # ── Tab: Tuning ────────────────────────────────────────────────
@@ -982,6 +888,13 @@ class TestPanel(QWidget):
         robot_pose = (float(robot.x), float(robot.y), float(robot.o))
         return ball_pos, robot_pose
 
+    def field_action(self, action_name):
+        """Called from the field right-click menu."""
+        if action_name == "stop":
+            self._send_stop()
+        else:
+            self._start_action(action_name)
+
     def _pick_goto_point(self):
         if self._field is None:
             self._goto_status.setStyleSheet(
@@ -1073,20 +986,22 @@ class TestPanel(QWidget):
         vy = 0.0
         w = 0.0
 
-        if dist < 150:
-            # Close to ball
-            if self._action_mode == "go_to_ball_kick":
+        if dist < 200:
+            # Close to ball — stop or kick
+            if self._action_mode == "go_to_ball_kick" and dist < 170:
                 if abs(angle) < 0.1:
-                    vx = 0.1
+                    vx = 0.08
                     kick = 1
                 else:
-                    w = max(-0.2, min(0.2, angle * 0.3))
-        elif abs(angle) > 0.25:
+                    w = max(-0.15, min(0.15, angle * 0.2))
+            # else: stay stopped (vx=0, w=0)
+        elif abs(angle) > 0.2:
             # Too far off — stop and turn to face ball first
-            w = max(-0.2, min(0.2, angle * 0.3))
+            w = max(-0.15, min(0.15, angle * 0.2))
         else:
-            # Facing the ball — drive forward only
-            speed = min(0.25, dist / 1500.0)
+            # Facing the ball — drive forward with decel ramp
+            # Ramp: 0 at 200mm, max 0.15 at 2000mm+
+            speed = min(0.15, max(0.0, (dist - 200) / 3000.0))
             vx = speed
 
         cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
@@ -1113,7 +1028,10 @@ class TestPanel(QWidget):
         dist = math.hypot(rel[0], rel[1])
         angle = math.atan2(rel[1], rel[0])
 
-        if dist < 100:
+        if dist < 150:
+            # Arrived — send explicit stop
+            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            self._do_send(cmd)
             self._stop_action()
             self._goto_status.setStyleSheet(
                 f"color:{SUCCESS}; font-size:12px; padding:4px;")
@@ -1124,12 +1042,17 @@ class TestPanel(QWidget):
         vx = 0.0
         w = 0.0
 
-        if abs(angle) > 0.25:
+        if abs(angle) > 0.2:
             # Turn to face target first
-            w = max(-0.2, min(0.2, angle * 0.3))
+            w = max(-0.15, min(0.15, angle * 0.2))
         else:
-            # Drive forward
-            speed = min(max_speed, dist / 1000.0)
+            # Drive forward with decel ramp
+            # Start slowing at 500mm out, stop zone at 150mm
+            ramp_dist = max(0.0, dist - 150)
+            speed = min(max_speed, ramp_dist / 2000.0)
+            # Floor: don't crawl below 0.03 or the robot stalls
+            if speed < 0.03:
+                speed = 0.03
             vx = speed
 
         cmd = self._build_cmd(vx=vx, vy=0, w=w, kick=0, dribble=0)
@@ -1142,7 +1065,7 @@ class TestPanel(QWidget):
         (-250, -250),   # back-left
         (-250,  250),   # front-left
     ]
-    _SQUARE_ARRIVE_DIST = 120  # mm — close enough to move to next waypoint
+    _SQUARE_ARRIVE_DIST = 150  # mm — close enough to move to next waypoint
 
     def _tick_draw_square(self):
         robot_pose = self._get_robot_pose()
@@ -1151,6 +1074,8 @@ class TestPanel(QWidget):
 
         # Safety — stop if near field boundary
         if self._is_near_boundary(robot_pose):
+            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            self._do_send(cmd)
             self._stop_action()
             self._action_status.setStyleSheet(
                 f"color:{WARNING}; font-size:12px; padding:4px;")
@@ -1158,6 +1083,8 @@ class TestPanel(QWidget):
             return
 
         if self._square_step >= len(self._SQUARE_WAYPOINTS):
+            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            self._do_send(cmd)
             self._stop_action()
             self._action_status.setStyleSheet(
                 f"color:{SUCCESS}; font-size:12px; padding:4px;")
@@ -1171,25 +1098,29 @@ class TestPanel(QWidget):
         angle = math.atan2(rel[1], rel[0])
 
         if dist < self._SQUARE_ARRIVE_DIST:
-            # Reached waypoint — move to next
+            # Stop at waypoint, then move to next
+            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            self._do_send(cmd)
             self._square_step += 1
             self._action_status.setText(
                 f"Draw Square — waypoint {self._square_step}/{len(self._SQUARE_WAYPOINTS)}")
             return
 
         vx = 0.0
-        vy = 0.0
         w = 0.0
 
-        if abs(angle) > 0.25:
+        if abs(angle) > 0.2:
             # Turn to face waypoint first
-            w = max(-0.2, min(0.2, angle * 0.3))
+            w = max(-0.15, min(0.15, angle * 0.2))
         else:
-            # Drive toward waypoint
-            speed = min(0.2, dist / 1000.0)
+            # Drive toward waypoint with decel ramp
+            ramp_dist = max(0.0, dist - 150)
+            speed = min(0.15, ramp_dist / 2000.0)
+            if speed < 0.03:
+                speed = 0.03
             vx = speed
 
-        cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=0, dribble=0)
+        cmd = self._build_cmd(vx=vx, vy=0, w=w, kick=0, dribble=0)
         self._do_send(cmd)
 
     def _test_connection(self):

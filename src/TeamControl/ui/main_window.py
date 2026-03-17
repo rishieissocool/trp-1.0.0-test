@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
         self._field.robot_placed.connect(
             lambda rid, yl, x, y: eng.place_robot(rid, yl, x, y))
         self._field.point_picked.connect(self._test_panel.go_to_point)
+        self._field.action_requested.connect(self._test_panel.field_action)
 
         self._settings.config_panel.config_changed.connect(
             lambda: self._log_panel.append("[config] Configuration saved"))

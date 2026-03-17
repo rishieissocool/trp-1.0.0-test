@@ -34,6 +34,7 @@ class FieldCanvas(QWidget):
     ball_placed = Signal(float, float)            # x_mm, y_mm
     robot_placed = Signal(int, bool, float, float)  # id, yellow, x, y
     point_picked = Signal(float, float)           # x_mm, y_mm — for go-to-point
+    action_requested = Signal(str)                # action name
     coordinate_hover = Signal(float, float)       # x_mm, y_mm
 
     def __init__(self, parent=None):
@@ -274,14 +275,27 @@ class FieldCanvas(QWidget):
 
         menu = QMenu(self)
         go_action = menu.addAction(f"Go to ({x:.0f}, {y:.0f})")
+        go_ball_action = menu.addAction("Go to Ball")
+        go_ball_kick_action = menu.addAction("Go to Ball && Kick")
+        draw_square_action = menu.addAction("Draw Square")
         menu.addSeparator()
-        ball_action = menu.addAction(f"Place ball here")
+        ball_action = menu.addAction("Place ball here")
+        menu.addSeparator()
+        stop_action = menu.addAction("Stop")
 
         chosen = menu.exec(ev.globalPosition().toPoint())
         if chosen == go_action:
             self.point_picked.emit(x, y)
+        elif chosen == go_ball_action:
+            self.action_requested.emit("go_to_ball")
+        elif chosen == go_ball_kick_action:
+            self.action_requested.emit("go_to_ball_kick")
+        elif chosen == draw_square_action:
+            self.action_requested.emit("draw_square")
         elif chosen == ball_action:
             self.ball_placed.emit(x, y)
+        elif chosen == stop_action:
+            self.action_requested.emit("stop")
 
     def mouseReleaseEvent(self, ev: QMouseEvent):
         if ev.button() == Qt.MiddleButton:
