@@ -85,6 +85,9 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._status_fps)
         self.setStatusBar(sb)
 
+        # Give dashboard access to the "Our Bot" spinner
+        self._dashboard.set_our_bot_spin(self._our_id_spin)
+
         # ── Wire signals ─────────────────────────────────────────
         self._wire_signals()
 

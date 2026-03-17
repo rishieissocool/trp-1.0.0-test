@@ -111,6 +111,9 @@ class DashboardPage(QWidget):
 
         self._field.coordinate_hover.connect(self.coordinate_hover.emit)
 
+        # "Our Bot" spinner reference (set by MainWindow after toolbar build)
+        self._our_id_spin = None
+
         # FPS tracking
         self._frame_times: list[float] = []
         self._last_frame_time = 0.0
@@ -275,6 +278,10 @@ class DashboardPage(QWidget):
         self._cal_stop_pos = None
         self._cal_history = {}
 
+    def set_our_bot_spin(self, spin):
+        """Store reference to the toolbar's 'Our Bot' QSpinBox."""
+        self._our_id_spin = spin
+
     def _get_robot_pos_cal(self):
         if not self._engine:
             return None
@@ -284,12 +291,10 @@ class DashboardPage(QWidget):
         frame = wm.get_latest_frame()
         if frame is None:
             return None
-        if self._test_panel:
-            rid = self._test_panel._id_spin.value()
-            is_yellow = self._test_panel._team_combo.currentText() == "Yellow"
-        else:
-            rid = 0
-            is_yellow = True
+        # Use "Our Bot" from toolbar; fall back to 0/yellow
+        rid = self._our_id_spin.value() if self._our_id_spin else 0
+        cfg = self._engine.config
+        is_yellow = cfg.us_yellow if cfg else True
         team = frame.robots_yellow if is_yellow else frame.robots_blue
         try:
             robot = team[rid]
@@ -303,7 +308,12 @@ class DashboardPage(QWidget):
     def _cal_send_cmd(self, vx=0.0, vy=0.0, w=0.0):
         if not self._test_panel:
             return
-        cmd = self._test_panel._build_cmd(vx=vx, vy=vy, w=w, kick=0, dribble=0)
+        from TeamControl.network.robot_command import RobotCommand
+        rid = self._our_id_spin.value() if self._our_id_spin else 0
+        cfg = self._engine.config if self._engine else None
+        is_yellow = cfg.us_yellow if cfg else True
+        cmd = RobotCommand(robot_id=rid, vx=vx, vy=vy, w=w,
+                           kick=0, dribble=0, isYellow=is_yellow)
         self._test_panel._do_send(cmd)
 
     def _cal_start(self):
