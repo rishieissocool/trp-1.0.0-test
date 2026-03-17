@@ -11,7 +11,7 @@ Features:
 """
 
 import math
-from PySide6.QtWidgets import QWidget, QToolTip
+from PySide6.QtWidgets import QWidget, QToolTip, QMenu
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QSize
 from PySide6.QtGui import (QPainter, QPen, QBrush, QColor, QFont,
                            QPainterPath, QTransform, QWheelEvent,
@@ -261,7 +261,27 @@ class FieldCanvas(QWidget):
             ev.accept()
             return
 
+        if ev.button() == Qt.RightButton:
+            self._show_field_menu(ev)
+            ev.accept()
+            return
+
         super().mousePressEvent(ev)
+
+    def _show_field_menu(self, ev: QMouseEvent):
+        pt = self._widget_to_field(ev.position())
+        x, y = pt.x(), pt.y()
+
+        menu = QMenu(self)
+        go_action = menu.addAction(f"Go to ({x:.0f}, {y:.0f})")
+        menu.addSeparator()
+        ball_action = menu.addAction(f"Place ball here")
+
+        chosen = menu.exec(ev.globalPosition().toPoint())
+        if chosen == go_action:
+            self.point_picked.emit(x, y)
+        elif chosen == ball_action:
+            self.ball_placed.emit(x, y)
 
     def mouseReleaseEvent(self, ev: QMouseEvent):
         if ev.button() == Qt.MiddleButton:
