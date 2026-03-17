@@ -925,14 +925,6 @@ class TestPanel(QWidget):
     # ── Action tests ────────────────────────────────────────────
 
     def _start_action(self, mode):
-        if not self._engine or not self._engine.is_running:
-            self._action_status.setStyleSheet(
-                f"color:{DANGER}; font-size:12px; padding:4px;")
-            self._action_status.setText(
-                "Engine not running — start the engine first")
-            self._log.err("Action test failed: engine not running")
-            return
-
         self._stop_action()
         self._action_mode = mode
         self._square_step = 0
@@ -961,6 +953,8 @@ class TestPanel(QWidget):
 
     def _get_ball_and_robot(self):
         """Get ball and robot positions from the engine's world model."""
+        if not self._engine:
+            return None, None
         wm = self._engine._wm
         if wm is None:
             return None, None
@@ -989,12 +983,6 @@ class TestPanel(QWidget):
         return ball_pos, robot_pose
 
     def _pick_goto_point(self):
-        if not self._engine or not self._engine.is_running:
-            self._goto_status.setStyleSheet(
-                f"color:{DANGER}; font-size:12px; padding:4px;")
-            self._goto_status.setText(
-                "Engine not running — start the engine first")
-            return
         if self._field is None:
             self._goto_status.setStyleSheet(
                 f"color:{DANGER}; font-size:12px; padding:4px;")
@@ -1033,6 +1021,8 @@ class TestPanel(QWidget):
 
     def _get_robot_pose(self):
         """Get just the robot pose (no ball needed)."""
+        if not self._engine:
+            return None
         wm = self._engine._wm
         if wm is None:
             return None
