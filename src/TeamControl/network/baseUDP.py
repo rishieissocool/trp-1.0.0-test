@@ -173,10 +173,8 @@ class BaseSocket():
         except socket.gaierror:
             pass
 
-        raise ValueError(
-            "Cannot determine LAN IP automatically. "
-            "Please pass an ip address manually."
-        )
+        log.debug("Could not detect LAN IP, falling back to 192.168.1.2")
+        return "192.168.1.2"
     
     @staticmethod
     def _generate_port() -> int:
