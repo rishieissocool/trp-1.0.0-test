@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         # ── Pages ─────────────────────────────────────────────────
         self._dashboard = DashboardPage(self._field)
         self._bt_panel = BehaviorTreePanel()
-        self._test_panel = TestPanel()
+        self._test_panel = TestPanel(engine=self._engine)
         self._dispatch_panel = DispatcherPanel()
         self._settings = SettingsPage()
         self._log_panel = LogPanel()

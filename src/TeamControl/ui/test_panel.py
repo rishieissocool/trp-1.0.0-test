@@ -29,6 +29,7 @@ from TeamControl.ui.theme import (
 )
 
 import json
+import math
 import os
 
 from TeamControl.network.robot_command import RobotCommand
@@ -36,7 +37,8 @@ from TeamControl.network.sender import Sender
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.utils.yaml_config import Config
-from TeamControl.robot.constants import _TUNING_PATH, _load_tuning
+from TeamControl.robot.constants import _TUNING_PATH, _load_tuning, MAX_W
+from TeamControl.world.transform_cords import world2robot
 
 
 def _ts():
@@ -96,8 +98,9 @@ def _sep():
 class TestPanel(QWidget):
     """Hardware testing & manual robot control console."""
 
-    def __init__(self, parent=None):
+    def __init__(self, engine=None, parent=None):
         super().__init__(parent)
+        self._engine = engine
         self._sender = Sender()
         self._grsim: grSimSender | None = None
         self._continuous_timer = QTimer(self)
@@ -106,6 +109,14 @@ class TestPanel(QWidget):
         self._robots: list[_RobotRow] = []
         self._n_sent = 0
         self._n_err = 0
+
+        # Action test state
+        self._action_timer = QTimer(self)
+        self._action_timer.setInterval(50)  # 20 Hz
+        self._action_timer.timeout.connect(self._action_tick)
+        self._action_mode = None  # "go_to_ball", "go_to_ball_kick", "draw_square"
+        self._square_step = 0
+        self._square_step_ticks = 0
 
         self._build_ui()
         self._load_robots()
@@ -360,6 +371,45 @@ class TestPanel(QWidget):
         lay.addLayout(grid)
 
         lay.addWidget(_sep())
+        lay.addWidget(_heading("Action Tests (require engine running)"))
+        lay.addWidget(QLabel(
+            "These run continuously using vision data. "
+            "Start the engine first, then click an action. Click STOP to cancel."))
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+
+        go_ball_btn = QPushButton("Go to Ball")
+        go_ball_btn.setMinimumHeight(48)
+        go_ball_btn.setMinimumWidth(160)
+        go_ball_btn.setToolTip("Drive to the ball using vision feedback (continuous)")
+        go_ball_btn.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT};")
+        go_ball_btn.clicked.connect(lambda: self._start_action("go_to_ball"))
+        action_row.addWidget(go_ball_btn)
+
+        go_ball_kick_btn = QPushButton("Go to Ball && Kick")
+        go_ball_kick_btn.setMinimumHeight(48)
+        go_ball_kick_btn.setMinimumWidth(160)
+        go_ball_kick_btn.setToolTip("Drive to ball, face goal, then kick (continuous)")
+        go_ball_kick_btn.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT};")
+        go_ball_kick_btn.clicked.connect(lambda: self._start_action("go_to_ball_kick"))
+        action_row.addWidget(go_ball_kick_btn)
+
+        square_btn = QPushButton("Draw Square")
+        square_btn.setMinimumHeight(48)
+        square_btn.setMinimumWidth(160)
+        square_btn.setToolTip("Drive in a square pattern within the field")
+        square_btn.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT};")
+        square_btn.clicked.connect(lambda: self._start_action("draw_square"))
+        action_row.addWidget(square_btn)
+
+        lay.addLayout(action_row)
+
+        self._action_status = QLabel("")
+        self._action_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:12px; padding:4px;")
+        lay.addWidget(self._action_status)
+
+        lay.addWidget(_sep())
 
         stop_row = QHBoxLayout()
         stop_btn = QPushButton("STOP SELECTED ROBOT")
@@ -386,8 +436,11 @@ class TestPanel(QWidget):
         page = QWidget()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ background: {BG_DARK}; border: none; }}")
 
         inner = QWidget()
+        inner.setStyleSheet(f"background: {BG_DARK};")
         lay = QVBoxLayout(inner)
         lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(12)
@@ -452,7 +505,8 @@ class TestPanel(QWidget):
         lay.addWidget(_sep())
         self._effective_w_label = QLabel()
         self._effective_w_label.setStyleSheet(
-            f"font-size:14px; font-weight:bold; color:{ACCENT}; padding:6px;")
+            f"font-size:14px; font-weight:bold; color:{ACCENT}; padding:10px; "
+            f"background:{BG_CARD}; border:1px solid {BORDER}; border-radius:6px;")
         self._update_effective_w_label()
         lay.addWidget(self._effective_w_label)
 
@@ -774,6 +828,7 @@ class TestPanel(QWidget):
         self._do_send(self._build_cmd())
 
     def _send_stop(self):
+        self._stop_action()
         cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
         self._do_send(cmd)
         self._zero_inputs()
@@ -827,6 +882,143 @@ class TestPanel(QWidget):
 
         self._update_counts()
         self._log.info(f"STOP ALL sent to {len(self._robots)} robots")
+
+    # ── Action tests ────────────────────────────────────────────
+
+    def _start_action(self, mode):
+        if not self._engine or not self._engine.is_running:
+            self._action_status.setStyleSheet(
+                f"color:{DANGER}; font-size:12px; padding:4px;")
+            self._action_status.setText(
+                "Engine not running — start the engine first")
+            self._log.err("Action test failed: engine not running")
+            return
+
+        self._stop_action()
+        self._action_mode = mode
+        self._square_step = 0
+        self._square_step_ticks = 0
+        self._action_timer.start()
+
+        labels = {
+            "go_to_ball": "Go to Ball",
+            "go_to_ball_kick": "Go to Ball & Kick",
+            "draw_square": "Draw Square",
+        }
+        self._action_status.setStyleSheet(
+            f"color:{SUCCESS}; font-size:12px; padding:4px;")
+        self._action_status.setText(
+            f"Running: {labels.get(mode, mode)} — click STOP to cancel")
+        self._log.info(f"Action test started: {labels.get(mode, mode)}")
+
+    def _stop_action(self):
+        if self._action_timer.isActive():
+            self._action_timer.stop()
+            self._action_mode = None
+            self._action_status.setText("")
+            # Send a stop command
+            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            self._do_send(cmd)
+
+    def _get_ball_and_robot(self):
+        """Get ball and robot positions from the engine's world model."""
+        wm = self._engine._wm
+        if wm is None:
+            return None, None
+        frame = wm.get_latest_frame()
+        if frame is None:
+            return None, None
+
+        ball = frame.ball
+        if ball is None:
+            return None, None
+        ball_pos = (float(ball.x), float(ball.y))
+
+        rid = self._id_spin.value()
+        is_yellow = self._team_combo.currentText() == "Yellow"
+        team = frame.robots_yellow if is_yellow else frame.robots_blue
+        try:
+            robot = team[rid]
+        except (IndexError, TypeError):
+            return ball_pos, None
+
+        from TeamControl.SSL.vision.robots import Robot
+        if not isinstance(robot, Robot):
+            return ball_pos, None
+
+        robot_pose = (float(robot.x), float(robot.y), float(robot.o))
+        return ball_pos, robot_pose
+
+    def _action_tick(self):
+        if self._action_mode == "draw_square":
+            self._tick_draw_square()
+            return
+
+        # go_to_ball or go_to_ball_kick
+        ball_pos, robot_pose = self._get_ball_and_robot()
+        if ball_pos is None or robot_pose is None:
+            return
+
+        rel_ball = world2robot(robot_pose, ball_pos)
+        dist = math.hypot(rel_ball[0], rel_ball[1])
+        angle = math.atan2(rel_ball[1], rel_ball[0])
+
+        kick = 0
+        dribble = 0
+
+        if dist < 150:
+            # Close to ball
+            if self._action_mode == "go_to_ball_kick":
+                # Face the ball and kick
+                if abs(angle) < 0.15:
+                    vx = 0.3
+                    vy = 0.0
+                    w = 0.0
+                    kick = 1
+                else:
+                    vx = 0.0
+                    vy = 0.0
+                    w = max(-MAX_W, min(MAX_W, angle * 0.8))
+            else:
+                # Just stop
+                vx = 0.0
+                vy = 0.0
+                w = 0.0
+        else:
+            # Drive toward ball
+            speed = min(1.0, dist / 500.0)
+            norm = dist if dist > 0 else 1
+            vx = (rel_ball[0] / norm) * speed
+            vy = (rel_ball[1] / norm) * speed
+            w = max(-MAX_W, min(MAX_W, angle * 0.8))
+
+        cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
+        self._do_send(cmd)
+
+    _SQUARE_SIDES = [
+        # (vx, vy, ticks)  — each side runs for N ticks at 20Hz
+        ( 0.5,  0.0, 30),   # forward
+        ( 0.0,  0.5, 30),   # left
+        (-0.5,  0.0, 30),   # backward
+        ( 0.0, -0.5, 30),   # right
+    ]
+
+    def _tick_draw_square(self):
+        if self._square_step >= len(self._SQUARE_SIDES):
+            self._stop_action()
+            self._action_status.setStyleSheet(
+                f"color:{SUCCESS}; font-size:12px; padding:4px;")
+            self._action_status.setText("Draw Square completed")
+            return
+
+        vx, vy, duration = self._SQUARE_SIDES[self._square_step]
+        cmd = self._build_cmd(vx=vx, vy=vy, w=0, kick=0, dribble=0)
+        self._do_send(cmd)
+
+        self._square_step_ticks += 1
+        if self._square_step_ticks >= duration:
+            self._square_step += 1
+            self._square_step_ticks = 0
 
     def _test_connection(self):
         ip = self._ip_edit.text().strip()
