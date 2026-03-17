@@ -31,6 +31,7 @@ DEFENSE_HALF_WIDTH = 1200
 
 ROBOT_RADIUS      = 90       # mm
 
+MAX_SPEED         = 1.0      # m/s — absolute hardware speed limit
 MAX_W             = 1.0      # rad/s — angular velocity cap
 TURN_GAIN         = 1.5      # proportional gain for angle → w
 
