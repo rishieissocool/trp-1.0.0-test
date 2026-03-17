@@ -100,6 +100,10 @@ gc:
   multicast-group: '224.5.23.1'
   port: 10003 
 
+local_ip: "192.168.1.2"
+
+
+
 use_grSim_vision: true
 us_yellow: true
 us_positive: us_yellow

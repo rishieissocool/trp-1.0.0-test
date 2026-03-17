@@ -27,6 +27,7 @@ class Config():
         self.vision = raw["vision"]["multicast-group"], raw["vision"]["port"] 
         self.game_controller = raw["gc"]["multicast-group"], raw["gc"]["port"]
         
+        self.local_ip = raw.get("local_ip", "192.168.1.2")
         self.use_grSim_vision = raw["use_grSim_vision"]
         self.us_yellow = raw["us_yellow"]
         self.us_positive = raw["us_positive"]
