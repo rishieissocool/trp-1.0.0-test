@@ -123,6 +123,7 @@ class TestPanel(QWidget):
         self._action_timer.setInterval(50)  # 20 Hz
         self._action_timer.timeout.connect(self._action_tick)
         self._action_mode = None  # "go_to_ball", "go_to_ball_kick", "draw_square", "go_to_point"
+        self._last_ball_dist = None  # track last known ball distance for kick-on-occlude
         self._square_step = 0
         self._square_step_ticks = 0
         self._goto_target = None  # (x_mm, y_mm) for go_to_point
@@ -837,6 +838,7 @@ class TestPanel(QWidget):
         self._action_mode = mode
         self._square_step = 0
         self._square_step_ticks = 0
+        self._last_ball_dist = None
         self._action_timer.start()
 
         labels = {
@@ -967,7 +969,17 @@ class TestPanel(QWidget):
 
         # go_to_ball or go_to_ball_kick
         ball_pos, robot_pose = self._get_ball_and_robot()
-        if ball_pos is None or robot_pose is None:
+        if robot_pose is None:
+            return
+
+        # Ball disappeared — if we were close, assume we're on it
+        if ball_pos is None:
+            if (self._action_mode == "go_to_ball_kick"
+                    and self._last_ball_dist is not None
+                    and self._last_ball_dist < 200):
+                # Ball occluded by robot — fire the kick
+                cmd = self._build_cmd(vx=0.3, vy=0, w=0, kick=1, dribble=0)
+                self._do_send(cmd)
             return
 
         # Safety — stop if near field boundary
@@ -981,6 +993,7 @@ class TestPanel(QWidget):
         rel_ball = world2robot(robot_pose, ball_pos)
         dist = math.hypot(rel_ball[0], rel_ball[1])
         angle = math.atan2(rel_ball[1], rel_ball[0])
+        self._last_ball_dist = dist
 
         kick = 0
         dribble = 0
@@ -993,21 +1006,20 @@ class TestPanel(QWidget):
         if dist < arrive_dist:
             # Right on the ball
             if self._action_mode == "go_to_ball_kick":
-                # Align then kick
                 if abs(angle) < 0.15:
-                    vx = 0.10
+                    vx = 0.3
                     kick = 1
                 else:
-                    w = max(-0.12, min(0.12, angle * 0.2))
+                    w = max(-0.3, min(0.3, angle * 0.5))
             else:
                 # go_to_ball — just stop, we're there
                 pass
         elif abs(angle) > 0.2:
-            # Too far off — stop and turn to face ball first
-            w = max(-0.15, min(0.15, angle * 0.2))
+            # Turn to face ball first
+            w = max(-0.4, min(0.4, angle * 0.5))
         else:
             # Facing the ball — drive forward with decel ramp
-            speed = min(0.15, max(0.03, (dist - arrive_dist) / 2000.0))
+            speed = min(0.5, max(0.05, (dist - arrive_dist) / 1000.0))
             vx = speed
 
         cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
@@ -1050,15 +1062,13 @@ class TestPanel(QWidget):
 
         if abs(angle) > 0.2:
             # Turn to face target first
-            w = max(-0.15, min(0.15, angle * 0.2))
+            w = max(-0.4, min(0.4, angle * 0.5))
         else:
             # Drive forward with decel ramp
-            # Start slowing at 500mm out, stop zone at 150mm
             ramp_dist = max(0.0, dist - 150)
-            speed = min(max_speed, ramp_dist / 2000.0)
-            # Floor: don't crawl below 0.03 or the robot stalls
-            if speed < 0.03:
-                speed = 0.03
+            speed = min(max_speed, ramp_dist / 1000.0)
+            if speed < 0.05:
+                speed = 0.05
             vx = speed
 
         cmd = self._build_cmd(vx=vx, vy=0, w=w, kick=0, dribble=0)
@@ -1117,13 +1127,13 @@ class TestPanel(QWidget):
 
         if abs(angle) > 0.2:
             # Turn to face waypoint first
-            w = max(-0.15, min(0.15, angle * 0.2))
+            w = max(-0.4, min(0.4, angle * 0.5))
         else:
             # Drive toward waypoint with decel ramp
             ramp_dist = max(0.0, dist - 150)
-            speed = min(0.15, ramp_dist / 2000.0)
-            if speed < 0.03:
-                speed = 0.03
+            speed = min(0.5, ramp_dist / 1000.0)
+            if speed < 0.05:
+                speed = 0.05
             vx = speed
 
         cmd = self._build_cmd(vx=vx, vy=0, w=w, kick=0, dribble=0)
