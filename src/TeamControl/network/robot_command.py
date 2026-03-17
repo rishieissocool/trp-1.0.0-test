@@ -1,5 +1,17 @@
 # Robot Commands
+import math
 import time
+
+from TeamControl.robot.constants import MAX_SPEED
+
+
+def _clamp_velocity(vx: float, vy: float, max_speed: float = MAX_SPEED) -> tuple[float, float]:
+    """Scale (vx, vy) so magnitude does not exceed max_speed."""
+    speed = math.hypot(vx, vy)
+    if speed <= 0 or speed <= max_speed:
+        return float(vx), float(vy)
+    scale = max_speed / speed
+    return vx * scale, vy * scale
 
 
 class RobotCommand():
@@ -22,8 +34,7 @@ class RobotCommand():
         self.time_set: float = time.time()
         self.isYellow: bool = isYellow
         self.robot_id: int = int(robot_id)
-        self.vx: float = float(vx)
-        self.vy: float = float(vy)
+        self.vx, self.vy = _clamp_velocity(float(vx), float(vy))
         self.w: float = float(w)
         self.kick: int = int(kick)
         self.dribble: int = int(dribble)

@@ -32,21 +32,23 @@ DEFENSE_HALF_WIDTH = 1200
 ROBOT_RADIUS      = 90       # mm
 
 MAX_SPEED         = 1.0      # m/s — absolute hardware speed limit
+
 MAX_W             = 1.0      # rad/s — angular velocity cap
 TURN_GAIN         = 1.5      # proportional gain for angle → w
 
-SPRINT_SPEED      = 2.2      # m/s — max repositioning
-CRUISE_SPEED      = 1.8      # m/s — medium approach
-CHARGE_SPEED      = 1.4      # m/s — close-range drive
-DRIBBLE_SPEED     = 1.0      # m/s — precise ball control
-ONETOUCH_SPEED    = 1.6      # m/s — one-touch redirect
+# Field speeds as fraction of MAX_SPEED (clamped automatically)
+SPRINT_SPEED      = 0.73 * MAX_SPEED   # max repositioning
+CRUISE_SPEED      = 0.60 * MAX_SPEED   # medium approach
+CHARGE_SPEED      = 0.47 * MAX_SPEED   # close-range drive
+DRIBBLE_SPEED     = 0.33 * MAX_SPEED   # precise ball control
+ONETOUCH_SPEED    = 0.53 * MAX_SPEED   # one-touch redirect
 
-# Goalie-specific speeds
-SAVE_SPEED        = 2.5      # m/s — shot-save sprint
-POSITION_SPEED    = 1.6      # m/s — angle narrowing
-CLEAR_SPEED       = 1.4      # m/s — dead-ball clearance
-RETREAT_SPEED     = 2.0      # m/s — return to goal
-DISTRIBUTE_SPEED  = 1.2      # m/s — dribble to pass
+# Goalie-specific speeds (fraction of MAX_SPEED)
+SAVE_SPEED        = 0.83 * MAX_SPEED   # shot-save sprint
+POSITION_SPEED    = 0.53 * MAX_SPEED   # angle narrowing
+CLEAR_SPEED       = 0.47 * MAX_SPEED   # dead-ball clearance
+RETREAT_SPEED     = 0.67 * MAX_SPEED   # return to goal
+DISTRIBUTE_SPEED  = 0.40 * MAX_SPEED   # dribble to pass
 
 # ═════════════════════════════════════════════════════════════════
 #  DISTANCES (mm)
