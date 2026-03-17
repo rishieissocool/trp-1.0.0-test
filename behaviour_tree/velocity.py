@@ -2,6 +2,7 @@ from enum import Enum, auto
 import math
 
 from TeamControl.world.transform_cords import world2robot
+from TeamControl.robot.constants import _load_tuning
 
 LINEAR = {
     "stop": [70, 0.01],
@@ -10,12 +11,16 @@ LINEAR = {
     "fast": [300, 2],
 }
 
-ANGULAR = {
-    "stop": [0.015, 0.01],
-    "slow": [0.05, 0.5],
-    "normal": [0.1, 1],  # avg. threshold and avg. speed
-    "fast": [1.0, 2],
-}
+def _angular_from_tuning():
+    t = _load_tuning()
+    return {
+        "stop": [0.015, 0.01],
+        "slow": [0.05, t["angular_slow_speed"]],
+        "normal": [0.1, t["angular_normal_speed"]],
+        "fast": [1.0, t["angular_fast_speed"]],
+    }
+
+ANGULAR = _angular_from_tuning()
 
 
 class Mode(Enum):

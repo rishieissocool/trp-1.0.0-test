@@ -12,6 +12,7 @@ import math
 from typing import Tuple
 
 from TeamControl.world.transform_cords import world2robot
+from TeamControl.robot.constants import MAX_W, PP_GAIN, PP_MIN_IMPULSE
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
@@ -76,8 +77,8 @@ def turn_toward(
     rel_target: Tuple[float, float],
     epsilon: float = 0.05,
     speed_scale: float = 1.0,
-    max_w: float = 2.0,
-    gain: float = 2.0,
+    max_w: float = MAX_W,
+    gain: float = PP_GAIN,
 ) -> float:
     """
     Smooth proportional angular velocity to face rel_target in robot frame.
@@ -91,8 +92,8 @@ def turn_toward(
     # Proportional control with minimum impulse for small angles
     w = speed_scale * gain * angle
     # Minimum angular velocity to overcome friction when close to target
-    if 0 < abs(w) < 0.5:
-        w = math.copysign(0.5, w)
+    if 0 < abs(w) < PP_MIN_IMPULSE:
+        w = math.copysign(PP_MIN_IMPULSE, w)
     return clamp(w, -max_w, max_w)
 
 

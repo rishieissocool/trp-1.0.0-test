@@ -28,11 +28,15 @@ from TeamControl.ui.theme import (
     YELLOW_TEAM, BLUE_TEAM, BG_DARK, BG_MID, BORDER,
 )
 
+import json
+import os
+
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.network.sender import Sender
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.utils.yaml_config import Config
+from TeamControl.robot.constants import _TUNING_PATH, _load_tuning
 
 
 def _ts():
@@ -119,6 +123,7 @@ class TestPanel(QWidget):
         tabs.setDocumentMode(True)
         tabs.addTab(self._build_drive_tab(), "Connect && Drive")
         tabs.addTab(self._build_quick_tab(), "Quick Tests")
+        tabs.addTab(self._build_tuning_tab(), "Tuning")
         tabs.addTab(self._build_robots_tab(), "Robots")
         tabs.addTab(self._build_log_tab(), "Packet Log")
         root.addWidget(tabs)
@@ -374,6 +379,168 @@ class TestPanel(QWidget):
 
         lay.addStretch()
         return page
+
+    # ── Tab: Tuning ────────────────────────────────────────────────
+
+    def _build_tuning_tab(self):
+        page = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(12)
+
+        lay.addWidget(_heading("Angular Velocity Tuning"))
+        lay.addWidget(QLabel(
+            "Adjust parameters below then click Save. "
+            "Values are written to tuning.json and apply when the model restarts."))
+
+        t = _load_tuning()
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        grid.setColumnStretch(1, 1)
+
+        self._tuning_spins = {}
+        params = [
+            ("max_w_raw",              "MAX_W (raw cap)",       0.05, 3.0,  t["max_w_raw"],              "rad/s"),
+            ("w_clamp_pct",            "Clamp %",               0.10, 1.0,  t["w_clamp_pct"],            ""),
+            ("turn_gain",              "Turn Gain",             0.1,  5.0,  t["turn_gain"],              ""),
+            ("face_ball_gain",         "Face-Ball Gain",        0.1,  5.0,  t["face_ball_gain"],         ""),
+            ("path_planner_gain",      "Path Planner Gain",     0.1,  5.0,  t["path_planner_gain"],      ""),
+            ("path_planner_min_impulse","Min Impulse",          0.0,  1.0,  t["path_planner_min_impulse"],"rad/s"),
+            ("angular_slow_speed",     "Angular Slow Speed",    0.01, 2.0,  t["angular_slow_speed"],     "rad/s"),
+            ("angular_normal_speed",   "Angular Normal Speed",  0.01, 2.0,  t["angular_normal_speed"],   "rad/s"),
+            ("angular_fast_speed",     "Angular Fast Speed",    0.01, 3.0,  t["angular_fast_speed"],     "rad/s"),
+        ]
+
+        for row, (key, label, lo, hi, default, suffix) in enumerate(params):
+            lbl = QLabel(label)
+            lbl.setStyleSheet("font-weight:bold; font-size:13px;")
+            lbl.setMinimumWidth(160)
+
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(int(lo * 100), int(hi * 100))
+            slider.setValue(int(default * 100))
+            slider.setMinimumWidth(200)
+
+            spin = QDoubleSpinBox()
+            spin.setRange(lo, hi)
+            spin.setValue(default)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.05)
+            if suffix:
+                spin.setSuffix(f"  {suffix}")
+            spin.setMinimumWidth(130)
+            spin.setMinimumHeight(30)
+            spin.setStyleSheet("font-size:13px;")
+
+            slider.valueChanged.connect(lambda v, s=spin: s.setValue(v / 100.0))
+            spin.valueChanged.connect(lambda v, sl=slider: sl.setValue(int(v * 100)))
+
+            grid.addWidget(lbl, row, 0)
+            grid.addWidget(slider, row, 1)
+            grid.addWidget(spin, row, 2)
+
+            self._tuning_spins[key] = spin
+
+        lay.addLayout(grid)
+
+        # Effective MAX_W readout
+        lay.addWidget(_sep())
+        self._effective_w_label = QLabel()
+        self._effective_w_label.setStyleSheet(
+            f"font-size:14px; font-weight:bold; color:{ACCENT}; padding:6px;")
+        self._update_effective_w_label()
+        lay.addWidget(self._effective_w_label)
+
+        self._tuning_spins["max_w_raw"].valueChanged.connect(
+            lambda _: self._update_effective_w_label())
+        self._tuning_spins["w_clamp_pct"].valueChanged.connect(
+            lambda _: self._update_effective_w_label())
+
+        # Buttons
+        lay.addWidget(_sep())
+        btn_row = QHBoxLayout()
+
+        save_btn = QPushButton("Save to tuning.json")
+        save_btn.setObjectName("startBtn")
+        save_btn.setMinimumHeight(44)
+        save_btn.setStyleSheet("font-size:14px; font-weight:bold;")
+        save_btn.clicked.connect(self._save_tuning)
+        btn_row.addWidget(save_btn)
+
+        reload_btn = QPushButton("Reload from file")
+        reload_btn.setMinimumHeight(44)
+        reload_btn.setStyleSheet("font-size:14px;")
+        reload_btn.clicked.connect(self._reload_tuning)
+        btn_row.addWidget(reload_btn)
+
+        reset_btn = QPushButton("Reset to defaults")
+        reset_btn.setMinimumHeight(44)
+        reset_btn.setStyleSheet(f"font-size:14px; color:{WARNING};")
+        reset_btn.clicked.connect(self._reset_tuning)
+        btn_row.addWidget(reset_btn)
+
+        lay.addLayout(btn_row)
+
+        self._tuning_status = QLabel("")
+        self._tuning_status.setStyleSheet(f"color:{SUCCESS}; font-size:12px; padding:4px;")
+        lay.addWidget(self._tuning_status)
+
+        lay.addStretch()
+        scroll.setWidget(inner)
+
+        wrapper = QVBoxLayout(page)
+        wrapper.setContentsMargins(0, 0, 0, 0)
+        wrapper.addWidget(scroll)
+        return page
+
+    def _update_effective_w_label(self):
+        raw = self._tuning_spins["max_w_raw"].value()
+        pct = self._tuning_spins["w_clamp_pct"].value()
+        eff = raw * pct
+        self._effective_w_label.setText(
+            f"Effective MAX_W = {raw:.2f} x {pct:.0%} = {eff:.3f} rad/s")
+
+    def _save_tuning(self):
+        data = {k: spin.value() for k, spin in self._tuning_spins.items()}
+        try:
+            with open(_TUNING_PATH, "w") as f:
+                json.dump(data, f, indent=4)
+            self._tuning_status.setStyleSheet(f"color:{SUCCESS}; font-size:12px; padding:4px;")
+            self._tuning_status.setText(
+                f"Saved to {_TUNING_PATH}  —  restart the model to apply")
+        except Exception as e:
+            self._tuning_status.setStyleSheet(f"color:{DANGER}; font-size:12px; padding:4px;")
+            self._tuning_status.setText(f"Save failed: {e}")
+
+    def _reload_tuning(self):
+        t = _load_tuning()
+        for key, spin in self._tuning_spins.items():
+            if key in t:
+                spin.setValue(t[key])
+        self._tuning_status.setStyleSheet(f"color:{SUCCESS}; font-size:12px; padding:4px;")
+        self._tuning_status.setText("Reloaded from tuning.json")
+
+    def _reset_tuning(self):
+        defaults = {
+            "max_w_raw": 0.5,
+            "w_clamp_pct": 0.60,
+            "turn_gain": 0.8,
+            "face_ball_gain": 0.8,
+            "path_planner_gain": 0.8,
+            "path_planner_min_impulse": 0.15,
+            "angular_slow_speed": 0.25,
+            "angular_normal_speed": 0.5,
+            "angular_fast_speed": 0.6,
+        }
+        for key, spin in self._tuning_spins.items():
+            spin.setValue(defaults.get(key, spin.value()))
+        self._tuning_status.setStyleSheet(f"color:{WARNING}; font-size:12px; padding:4px;")
+        self._tuning_status.setText("Reset to defaults — click Save to persist")
 
     # ── Tab 3: Robots table ───────────────────────────────────────
 

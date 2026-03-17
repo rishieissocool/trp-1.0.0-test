@@ -2,7 +2,41 @@
 Central constants for all robot behaviour and field geometry.
 
 Edit values HERE — every robot file imports from this single source.
+Tunable angular-velocity parameters are loaded from tuning.json at the
+project root.  The UI Tuning tab writes that file; restarting the model
+in the same app instance picks up the new values automatically.
 """
+
+import json
+import os
+
+_TUNING_PATH = os.path.join(
+    os.path.dirname(__file__), os.pardir, os.pardir, os.pardir, "tuning.json")
+_TUNING_PATH = os.path.normpath(_TUNING_PATH)
+
+def _load_tuning():
+    defaults = {
+        "max_w_raw": 0.5,
+        "w_clamp_pct": 0.60,
+        "turn_gain": 0.8,
+        "face_ball_gain": 0.8,
+        "path_planner_gain": 0.8,
+        "path_planner_min_impulse": 0.15,
+        "angular_slow_speed": 0.25,
+        "angular_normal_speed": 0.5,
+        "angular_fast_speed": 0.6,
+    }
+    try:
+        with open(_TUNING_PATH, "r") as f:
+            data = json.load(f)
+        for k in defaults:
+            if k in data:
+                defaults[k] = float(data[k])
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        pass
+    return defaults
+
+_t = _load_tuning()
 
 # ═════════════════════════════════════════════════════════════════
 #  FIELD GEOMETRY (mm) — SSL small field 5000 × 3000
@@ -33,8 +67,14 @@ ROBOT_RADIUS      = 90       # mm
 
 MAX_SPEED         = 1.0      # m/s — absolute hardware speed limit
 
-MAX_W             = 1.0      # rad/s — angular velocity cap
-TURN_GAIN         = 1.5      # proportional gain for angle → w
+_MAX_W_RAW        = _t["max_w_raw"]
+W_CLAMP_PCT       = _t["w_clamp_pct"]
+MAX_W             = _MAX_W_RAW * W_CLAMP_PCT
+TURN_GAIN         = _t["turn_gain"]
+
+# Path-planner defaults (read by path_planner.py)
+PP_GAIN           = _t["path_planner_gain"]
+PP_MIN_IMPULSE    = _t["path_planner_min_impulse"]
 
 # Field speeds as fraction of MAX_SPEED (clamped automatically)
 SPRINT_SPEED      = 0.73 * MAX_SPEED   # max repositioning
@@ -68,7 +108,7 @@ PASS_CLEAR        = 400      # mm — pass lane clearance
 #  ANGULAR
 # ═════════════════════════════════════════════════════════════════
 
-FACE_BALL_GAIN    = 1.5      # goalie proportional gain for facing ball
+FACE_BALL_GAIN    = _t["face_ball_gain"]
 ONETOUCH_ANGLE    = 0.8      # max angle offset for one-touch redirect
 
 # ═════════════════════════════════════════════════════════════════

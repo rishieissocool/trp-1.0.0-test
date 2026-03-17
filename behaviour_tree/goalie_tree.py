@@ -10,6 +10,8 @@ import py_trees
 from TeamControl.robot.path_planner import move_toward_relative, turn_toward
 from TeamControl.world.transform_cords import world2robot
 
+from TeamControl.robot.constants import MAX_W, FACE_BALL_GAIN
+
 from .common_trees import GetWorldPositionUpdate, GetRobotIDPosition, SendRobotCommand
 
 FIELD_LENGTH = 9000
@@ -30,8 +32,6 @@ RETREAT_SPEED = 2.0
 KICK_DIST = 175
 STOP_RADIUS = 30
 RAMP_DIST = 220
-MAX_W = 9.0
-FACE_BALL_GAIN = 6.5
 
 # Shot detection
 SHOT_SPEED_THRESH = 500     # mm/s

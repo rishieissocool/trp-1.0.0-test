@@ -11,6 +11,8 @@ from TeamControl.robot.Movement import RobotMovement
 from TeamControl.robot.path_planner import move_toward_relative, turn_toward
 from TeamControl.world.transform_cords import world2robot
 
+from TeamControl.robot.constants import MAX_W, TURN_GAIN
+
 from .common_trees import GetWorldPositionUpdate, GetRobotIDPosition, SendRobotCommand
 
 FIELD_LENGTH = 9000
@@ -29,7 +31,6 @@ CLOSE_TO_BEHIND_MM = 180
 KICK_MM = 170
 ALIGN_RAD = 0.32
 KICK_COOLDOWN_S = 0.22
-MAX_W = 2.0
 STOP_RADIUS = 35
 RAMP_DIST = 350
 
