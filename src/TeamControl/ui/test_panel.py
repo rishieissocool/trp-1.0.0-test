@@ -505,8 +505,7 @@ class TestPanel(QWidget):
         lay.addWidget(_sep())
         self._effective_w_label = QLabel()
         self._effective_w_label.setStyleSheet(
-            f"font-size:14px; font-weight:bold; color:{ACCENT}; padding:10px; "
-            f"background:{BG_CARD}; border:1px solid {BORDER}; border-radius:6px;")
+            f"font-size:14px; font-weight:bold; color:{ACCENT}; padding:6px;")
         self._update_effective_w_label()
         lay.addWidget(self._effective_w_label)
 
