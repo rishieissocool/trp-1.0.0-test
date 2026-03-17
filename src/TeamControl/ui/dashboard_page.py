@@ -324,6 +324,10 @@ class DashboardPage(QWidget):
         self._cal_status.setText("Navigating to start position (left side)...")
         self._cal_status.setStyleSheet(f"color:{WARNING}; font-size:11px;")
         self._cal_results.setText("")
+
+        # Show the two points on the field
+        self._field.set_targets([self._cal_start_side, self._cal_target])
+
         self._cal_tick_timer.start()
 
     def _cal_tick(self):
@@ -388,10 +392,12 @@ class DashboardPage(QWidget):
         final = self._get_robot_pos_cal()
         self._cal_phase = None
         self._cal_run_btn.setEnabled(True)
+        self._field.set_targets([])
 
         if final is None or self._cal_stop_pos is None:
             self._cal_status.setText("Failed — lost robot position")
             self._cal_status.setStyleSheet(f"color:{DANGER}; font-size:11px;")
+            self._field.set_targets([])
             return
 
         drift = math.hypot(
