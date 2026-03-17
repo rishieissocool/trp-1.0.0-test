@@ -26,6 +26,7 @@ from TeamControl.ui.test_panel import TestPanel
 from TeamControl.ui.settings_page import SettingsPage
 from TeamControl.ui.dispatcher_panel import DispatcherPanel
 from TeamControl.ui.log_panel import LogPanel
+from TeamControl.ui.calibration_page import CalibrationPage
 
 
 class MainWindow(QMainWindow):
@@ -50,6 +51,8 @@ class MainWindow(QMainWindow):
             self._field, engine=self._engine, test_panel=self._test_panel)
         self._bt_panel = BehaviorTreePanel()
         self._dispatch_panel = DispatcherPanel()
+        self._calibration = CalibrationPage(
+            engine=self._engine, test_panel=self._test_panel)
         self._settings = SettingsPage()
         self._log_panel = LogPanel()
 
@@ -61,6 +64,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._bt_panel, "  Behavior Tree  ")
         self._tabs.addTab(self._test_panel, "  Hardware Test  ")
         self._tabs.addTab(self._dispatch_panel, "  Dispatcher  ")
+        self._tabs.addTab(self._calibration, "  Calibration  ")
         self._tabs.addTab(self._settings, "  Settings  ")
         self._tabs.addTab(self._log_panel, "  Console  ")
         self.setCentralWidget(self._tabs)
@@ -85,8 +89,8 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._status_fps)
         self.setStatusBar(sb)
 
-        # Give dashboard access to the "Our Bot" spinner
-        self._dashboard.set_our_bot_spin(self._our_id_spin)
+        # Give calibration access to the "Our Bot" spinner
+        self._calibration.set_our_bot_spin(self._our_id_spin)
 
         # ── Wire signals ─────────────────────────────────────────
         self._wire_signals()
@@ -197,7 +201,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         for i, name in enumerate(["Dashboard", "Behavior Tree",
                                    "Hardware Test", "Dispatcher",
-                                   "Settings", "Console"]):
+                                   "Calibration", "Settings", "Console"]):
             view_menu.addAction(
                 name, lambda checked=False, idx=i: self._tabs.setCurrentIndex(idx))
 

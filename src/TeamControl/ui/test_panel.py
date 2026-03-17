@@ -261,13 +261,15 @@ class TestPanel(QWidget):
         kd_grid = QGridLayout()
         kd_grid.setSpacing(10)
 
-        self._kick_cb = QCheckBox("Kick")
-        self._kick_cb.setStyleSheet("font-size:14px; font-weight:bold;")
-        self._dribble_cb = QCheckBox("Dribble / Spinner")
-        self._dribble_cb.setStyleSheet("font-size:14px; font-weight:bold;")
+        self._kick_btn = QPushButton("Kick")
+        self._kick_btn.setStyleSheet("font-size:14px; font-weight:bold;")
+        self._kick_btn.setCheckable(True)
+        self._dribble_btn = QPushButton("Dribble / Spinner")
+        self._dribble_btn.setStyleSheet("font-size:14px; font-weight:bold;")
+        self._dribble_btn.setCheckable(True)
 
-        kd_grid.addWidget(self._kick_cb, 0, 0)
-        kd_grid.addWidget(self._dribble_cb, 0, 1)
+        kd_grid.addWidget(self._kick_btn, 0, 0)
+        kd_grid.addWidget(self._dribble_btn, 0, 1)
 
         self._kick_speed_spin = QDoubleSpinBox()
         self._kick_speed_spin.setRange(0, 20)
@@ -716,8 +718,8 @@ class TestPanel(QWidget):
             vx=vx if vx is not None else self._vx_spin.value(),
             vy=vy if vy is not None else self._vy_spin.value(),
             w=w if w is not None else self._w_spin.value(),
-            kick=kick if kick is not None else int(self._kick_cb.isChecked()),
-            dribble=dribble if dribble is not None else int(self._dribble_cb.isChecked()),
+            kick=kick if kick is not None else int(self._kick_btn.isChecked()),
+            dribble=dribble if dribble is not None else int(self._dribble_btn.isChecked()),
             isYellow=(self._team_combo.currentText() == "Yellow"),
         )
 
@@ -783,8 +785,8 @@ class TestPanel(QWidget):
         self._vx_spin.setValue(0)
         self._vy_spin.setValue(0)
         self._w_spin.setValue(0)
-        self._kick_cb.setChecked(False)
-        self._dribble_cb.setChecked(False)
+        self._kick_btn.setChecked(False)
+        self._dribble_btn.setChecked(False)
 
     def _send_test(self, vx, vy, w, kick, dribble):
         cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
