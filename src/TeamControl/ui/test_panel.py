@@ -986,23 +986,34 @@ class TestPanel(QWidget):
         vy = 0.0
         w = 0.0
 
-        if dist < 200:
-            # Close to ball — stop or kick
-            if self._action_mode == "go_to_ball_kick" and dist < 170:
-                if abs(angle) < 0.1:
-                    vx = 0.08
+        # Thresholds differ: go_to_ball gets right up to the ball for kicking;
+        # go_to_ball_kick does the same then fires the kicker.
+        arrive_dist = 90  # mm — close enough to touch/kick
+
+        if dist < arrive_dist:
+            # Right on the ball
+            if self._action_mode == "go_to_ball_kick":
+                # Align then kick
+                if abs(angle) < 0.15:
+                    vx = 0.10
                     kick = 1
+                    dribble = 1
                 else:
-                    w = max(-0.15, min(0.15, angle * 0.2))
-            # else: stay stopped (vx=0, w=0)
+                    w = max(-0.12, min(0.12, angle * 0.2))
+            else:
+                # go_to_ball — just stop, we're there
+                pass
         elif abs(angle) > 0.2:
             # Too far off — stop and turn to face ball first
             w = max(-0.15, min(0.15, angle * 0.2))
         else:
             # Facing the ball — drive forward with decel ramp
-            # Ramp: 0 at 200mm, max 0.15 at 2000mm+
-            speed = min(0.15, max(0.0, (dist - 200) / 3000.0))
+            # Slow approach: ramp down as we get close
+            speed = min(0.15, max(0.03, (dist - arrive_dist) / 2000.0))
             vx = speed
+            # Turn on dribbler when close for go_to_ball_kick
+            if self._action_mode == "go_to_ball_kick" and dist < 300:
+                dribble = 1
 
         cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
         self._do_send(cmd)
