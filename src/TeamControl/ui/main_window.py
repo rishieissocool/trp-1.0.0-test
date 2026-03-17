@@ -45,9 +45,10 @@ class MainWindow(QMainWindow):
         self._field = FieldCanvas()
 
         # ── Pages ─────────────────────────────────────────────────
-        self._dashboard = DashboardPage(self._field)
-        self._bt_panel = BehaviorTreePanel()
         self._test_panel = TestPanel(engine=self._engine, field=self._field)
+        self._dashboard = DashboardPage(
+            self._field, engine=self._engine, test_panel=self._test_panel)
+        self._bt_panel = BehaviorTreePanel()
         self._dispatch_panel = DispatcherPanel()
         self._settings = SettingsPage()
         self._log_panel = LogPanel()
