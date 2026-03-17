@@ -37,8 +37,15 @@ from TeamControl.network.sender import Sender
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.utils.yaml_config import Config
-from TeamControl.robot.constants import _TUNING_PATH, _load_tuning, MAX_W
+from TeamControl.robot.constants import (
+    _TUNING_PATH, _load_tuning, MAX_W,
+    HALF_LEN, HALF_WID, FIELD_MARGIN,
+)
 from TeamControl.world.transform_cords import world2robot
+
+# Safe boundary — stop if the robot gets this close to the field edge
+_SAFE_X = HALF_LEN - FIELD_MARGIN   # 2200 mm from center
+_SAFE_Y = HALF_WID - FIELD_MARGIN   # 1200 mm from center
 
 
 def _ts():
@@ -98,9 +105,10 @@ def _sep():
 class TestPanel(QWidget):
     """Hardware testing & manual robot control console."""
 
-    def __init__(self, engine=None, parent=None):
+    def __init__(self, engine=None, field=None, parent=None):
         super().__init__(parent)
         self._engine = engine
+        self._field = field
         self._sender = Sender()
         self._grsim: grSimSender | None = None
         self._continuous_timer = QTimer(self)
@@ -114,9 +122,10 @@ class TestPanel(QWidget):
         self._action_timer = QTimer(self)
         self._action_timer.setInterval(50)  # 20 Hz
         self._action_timer.timeout.connect(self._action_tick)
-        self._action_mode = None  # "go_to_ball", "go_to_ball_kick", "draw_square"
+        self._action_mode = None  # "go_to_ball", "go_to_ball_kick", "draw_square", "go_to_point"
         self._square_step = 0
         self._square_step_ticks = 0
+        self._goto_target = None  # (x_mm, y_mm) for go_to_point
 
         self._build_ui()
         self._load_robots()
@@ -408,6 +417,37 @@ class TestPanel(QWidget):
         self._action_status = QLabel("")
         self._action_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:12px; padding:4px;")
         lay.addWidget(self._action_status)
+
+        lay.addWidget(_sep())
+        lay.addWidget(_heading("Go to Point"))
+        lay.addWidget(QLabel(
+            "Set a velocity factor, then click Pick Point and click on the field."))
+
+        goto_row = QHBoxLayout()
+        goto_row.setSpacing(8)
+
+        goto_row.addWidget(QLabel("Velocity:"))
+        self._goto_vel_spin = QDoubleSpinBox()
+        self._goto_vel_spin.setRange(0.05, 2.0)
+        self._goto_vel_spin.setValue(0.2)
+        self._goto_vel_spin.setSingleStep(0.05)
+        self._goto_vel_spin.setSuffix("  m/s")
+        self._goto_vel_spin.setMinimumWidth(120)
+        goto_row.addWidget(self._goto_vel_spin)
+
+        pick_btn = QPushButton("Pick Point on Field")
+        pick_btn.setMinimumHeight(44)
+        pick_btn.setMinimumWidth(180)
+        pick_btn.setStyleSheet(f"font-size:13px; font-weight:bold; color:{ACCENT};")
+        pick_btn.setToolTip("Click this, then click a point on the Dashboard field view")
+        pick_btn.clicked.connect(self._pick_goto_point)
+        goto_row.addWidget(pick_btn)
+
+        lay.addLayout(goto_row)
+
+        self._goto_status = QLabel("")
+        self._goto_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:12px; padding:4px;")
+        lay.addWidget(self._goto_status)
 
         lay.addWidget(_sep())
 
@@ -948,14 +988,89 @@ class TestPanel(QWidget):
         robot_pose = (float(robot.x), float(robot.y), float(robot.o))
         return ball_pos, robot_pose
 
+    def _pick_goto_point(self):
+        if not self._engine or not self._engine.is_running:
+            self._goto_status.setStyleSheet(
+                f"color:{DANGER}; font-size:12px; padding:4px;")
+            self._goto_status.setText(
+                "Engine not running — start the engine first")
+            return
+        if self._field is None:
+            self._goto_status.setStyleSheet(
+                f"color:{DANGER}; font-size:12px; padding:4px;")
+            self._goto_status.setText("No field canvas available")
+            return
+        self._field.set_place_mode("go_to_point")
+        self._goto_status.setStyleSheet(
+            f"color:{WARNING}; font-size:12px; padding:4px;")
+        self._goto_status.setText("Click a point on the Dashboard field view...")
+
+    def go_to_point(self, x_mm, y_mm):
+        """Called when the user clicks on the field after picking go-to-point."""
+        # Clamp target inside safe bounds
+        x_mm = max(-_SAFE_X, min(_SAFE_X, x_mm))
+        y_mm = max(-_SAFE_Y, min(_SAFE_Y, y_mm))
+        self._goto_target = (x_mm, y_mm)
+        self._stop_action()
+        self._action_mode = "go_to_point"
+        self._action_timer.start()
+        self._goto_status.setStyleSheet(
+            f"color:{SUCCESS}; font-size:12px; padding:4px;")
+        self._goto_status.setText(
+            f"Going to ({x_mm:.0f}, {y_mm:.0f}) at "
+            f"{self._goto_vel_spin.value():.2f} m/s — click STOP to cancel")
+        self._action_status.setStyleSheet(
+            f"color:{SUCCESS}; font-size:12px; padding:4px;")
+        self._action_status.setText("Running: Go to Point — click STOP to cancel")
+        self._log.info(f"Go to point ({x_mm:.0f}, {y_mm:.0f})")
+
+    def _is_near_boundary(self, robot_pose):
+        """True if the robot is close to the field edge."""
+        if robot_pose is None:
+            return False
+        rx, ry = abs(robot_pose[0]), abs(robot_pose[1])
+        return rx > _SAFE_X or ry > _SAFE_Y
+
+    def _get_robot_pose(self):
+        """Get just the robot pose (no ball needed)."""
+        wm = self._engine._wm
+        if wm is None:
+            return None
+        frame = wm.get_latest_frame()
+        if frame is None:
+            return None
+        rid = self._id_spin.value()
+        is_yellow = self._team_combo.currentText() == "Yellow"
+        team = frame.robots_yellow if is_yellow else frame.robots_blue
+        try:
+            robot = team[rid]
+        except (IndexError, TypeError):
+            return None
+        from TeamControl.SSL.vision.robots import Robot
+        if not isinstance(robot, Robot):
+            return None
+        return (float(robot.x), float(robot.y), float(robot.o))
+
     def _action_tick(self):
         if self._action_mode == "draw_square":
             self._tick_draw_square()
             return
 
+        if self._action_mode == "go_to_point":
+            self._tick_go_to_point()
+            return
+
         # go_to_ball or go_to_ball_kick
         ball_pos, robot_pose = self._get_ball_and_robot()
         if ball_pos is None or robot_pose is None:
+            return
+
+        # Safety — stop if near field boundary
+        if self._is_near_boundary(robot_pose):
+            self._stop_action()
+            self._action_status.setStyleSheet(
+                f"color:{WARNING}; font-size:12px; padding:4px;")
+            self._action_status.setText("Stopped — robot near field boundary")
             return
 
         rel_ball = world2robot(robot_pose, ball_pos)
@@ -964,60 +1079,128 @@ class TestPanel(QWidget):
 
         kick = 0
         dribble = 0
+        vx = 0.0
+        vy = 0.0
+        w = 0.0
 
         if dist < 150:
             # Close to ball
             if self._action_mode == "go_to_ball_kick":
-                # Face the ball and kick
-                if abs(angle) < 0.15:
-                    vx = 0.3
-                    vy = 0.0
-                    w = 0.0
+                if abs(angle) < 0.1:
+                    vx = 0.1
                     kick = 1
                 else:
-                    vx = 0.0
-                    vy = 0.0
-                    w = max(-MAX_W, min(MAX_W, angle * 0.8))
-            else:
-                # Just stop
-                vx = 0.0
-                vy = 0.0
-                w = 0.0
+                    w = max(-0.2, min(0.2, angle * 0.3))
+        elif abs(angle) > 0.25:
+            # Too far off — stop and turn to face ball first
+            w = max(-0.2, min(0.2, angle * 0.3))
         else:
-            # Drive toward ball
-            speed = min(1.0, dist / 500.0)
-            norm = dist if dist > 0 else 1
-            vx = (rel_ball[0] / norm) * speed
-            vy = (rel_ball[1] / norm) * speed
-            w = max(-MAX_W, min(MAX_W, angle * 0.8))
+            # Facing the ball — drive forward only
+            speed = min(0.25, dist / 1500.0)
+            vx = speed
 
         cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
         self._do_send(cmd)
 
-    _SQUARE_SIDES = [
-        # (vx, vy, ticks)  — each side runs for N ticks at 20Hz
-        ( 0.5,  0.0, 30),   # forward
-        ( 0.0,  0.5, 30),   # left
-        (-0.5,  0.0, 30),   # backward
-        ( 0.0, -0.5, 30),   # right
+    def _tick_go_to_point(self):
+        if self._goto_target is None:
+            self._stop_action()
+            return
+
+        robot_pose = self._get_robot_pose()
+        if robot_pose is None:
+            return
+
+        # Safety — stop if near field boundary
+        if self._is_near_boundary(robot_pose):
+            self._stop_action()
+            self._goto_status.setStyleSheet(
+                f"color:{WARNING}; font-size:12px; padding:4px;")
+            self._goto_status.setText("Stopped — robot near field boundary")
+            return
+
+        rel = world2robot(robot_pose, self._goto_target)
+        dist = math.hypot(rel[0], rel[1])
+        angle = math.atan2(rel[1], rel[0])
+
+        if dist < 100:
+            self._stop_action()
+            self._goto_status.setStyleSheet(
+                f"color:{SUCCESS}; font-size:12px; padding:4px;")
+            self._goto_status.setText("Arrived at target point")
+            return
+
+        max_speed = self._goto_vel_spin.value()
+        vx = 0.0
+        w = 0.0
+
+        if abs(angle) > 0.25:
+            # Turn to face target first
+            w = max(-0.2, min(0.2, angle * 0.3))
+        else:
+            # Drive forward
+            speed = min(max_speed, dist / 1000.0)
+            vx = speed
+
+        cmd = self._build_cmd(vx=vx, vy=0, w=w, kick=0, dribble=0)
+        self._do_send(cmd)
+
+    # Square waypoints — small square near center of field (500mm sides)
+    _SQUARE_WAYPOINTS = [
+        ( 250,  250),   # front-right
+        ( 250, -250),   # back-right
+        (-250, -250),   # back-left
+        (-250,  250),   # front-left
     ]
+    _SQUARE_ARRIVE_DIST = 120  # mm — close enough to move to next waypoint
 
     def _tick_draw_square(self):
-        if self._square_step >= len(self._SQUARE_SIDES):
+        robot_pose = self._get_robot_pose()
+        if robot_pose is None:
+            return
+
+        # Safety — stop if near field boundary
+        if self._is_near_boundary(robot_pose):
+            self._stop_action()
+            self._action_status.setStyleSheet(
+                f"color:{WARNING}; font-size:12px; padding:4px;")
+            self._action_status.setText("Stopped — robot near field boundary")
+            return
+
+        if self._square_step >= len(self._SQUARE_WAYPOINTS):
             self._stop_action()
             self._action_status.setStyleSheet(
                 f"color:{SUCCESS}; font-size:12px; padding:4px;")
             self._action_status.setText("Draw Square completed")
             return
 
-        vx, vy, duration = self._SQUARE_SIDES[self._square_step]
-        cmd = self._build_cmd(vx=vx, vy=vy, w=0, kick=0, dribble=0)
-        self._do_send(cmd)
+        # Navigate to current waypoint
+        target = self._SQUARE_WAYPOINTS[self._square_step]
+        rel = world2robot(robot_pose, target)
+        dist = math.hypot(rel[0], rel[1])
+        angle = math.atan2(rel[1], rel[0])
 
-        self._square_step_ticks += 1
-        if self._square_step_ticks >= duration:
+        if dist < self._SQUARE_ARRIVE_DIST:
+            # Reached waypoint — move to next
             self._square_step += 1
-            self._square_step_ticks = 0
+            self._action_status.setText(
+                f"Draw Square — waypoint {self._square_step}/{len(self._SQUARE_WAYPOINTS)}")
+            return
+
+        vx = 0.0
+        vy = 0.0
+        w = 0.0
+
+        if abs(angle) > 0.25:
+            # Turn to face waypoint first
+            w = max(-0.2, min(0.2, angle * 0.3))
+        else:
+            # Drive toward waypoint
+            speed = min(0.2, dist / 1000.0)
+            vx = speed
+
+        cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=0, dribble=0)
+        self._do_send(cmd)
 
     def _test_connection(self):
         ip = self._ip_edit.text().strip()

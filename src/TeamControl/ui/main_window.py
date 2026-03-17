@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         # ── Pages ─────────────────────────────────────────────────
         self._dashboard = DashboardPage(self._field)
         self._bt_panel = BehaviorTreePanel()
-        self._test_panel = TestPanel(engine=self._engine)
+        self._test_panel = TestPanel(engine=self._engine, field=self._field)
         self._dispatch_panel = DispatcherPanel()
         self._settings = SettingsPage()
         self._log_panel = LogPanel()
@@ -248,6 +248,7 @@ class MainWindow(QMainWindow):
             lambda x, y: eng.place_ball(x, y))
         self._field.robot_placed.connect(
             lambda rid, yl, x, y: eng.place_robot(rid, yl, x, y))
+        self._field.point_picked.connect(self._test_panel.go_to_point)
 
         self._settings.config_panel.config_changed.connect(
             lambda: self._log_panel.append("[config] Configuration saved"))

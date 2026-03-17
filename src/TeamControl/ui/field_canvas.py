@@ -33,6 +33,7 @@ class FieldCanvas(QWidget):
 
     ball_placed = Signal(float, float)            # x_mm, y_mm
     robot_placed = Signal(int, bool, float, float)  # id, yellow, x, y
+    point_picked = Signal(float, float)           # x_mm, y_mm — for go-to-point
     coordinate_hover = Signal(float, float)       # x_mm, y_mm
 
     def __init__(self, parent=None):
@@ -250,6 +251,8 @@ class FieldCanvas(QWidget):
             pt = self._widget_to_field(ev.position())
             if self._place_mode == "ball":
                 self.ball_placed.emit(pt.x(), pt.y())
+            elif self._place_mode == "go_to_point":
+                self.point_picked.emit(pt.x(), pt.y())
             elif isinstance(self._place_mode, tuple):
                 _, rid, yellow = self._place_mode
                 self.robot_placed.emit(rid, yellow, pt.x(), pt.y())
