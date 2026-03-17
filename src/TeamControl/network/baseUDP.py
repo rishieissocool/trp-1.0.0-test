@@ -162,18 +162,20 @@ class BaseSocket():
                 ip = s.getsockname()[0]
                 if ip and not ip.startswith("127."):
                     return ip
-        except OSError:
-            pass
+                print(f"[baseUDP] dummy-socket returned invalid IP: {ip!r}")
+        except OSError as e:
+            print(f"[baseUDP] dummy-socket failed: {e}")
 
         # Fallback: resolve hostname (can return 127.x on some setups)
         try:
             ip = socket.gethostbyname(socket.gethostname())
             if ip and not ip.startswith("127."):
                 return ip
-        except socket.gaierror:
-            pass
+            print(f"[baseUDP] gethostbyname returned invalid IP: {ip!r}")
+        except socket.gaierror as e:
+            print(f"[baseUDP] gethostbyname failed: {e}")
 
-        log.debug("Could not detect LAN IP, falling back to 192.168.1.2")
+        print("[baseUDP] Could not detect LAN IP, falling back to 192.168.1.2")
         return "192.168.1.2"
     
     @staticmethod
