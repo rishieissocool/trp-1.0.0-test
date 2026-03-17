@@ -107,4 +107,4 @@ network:
 use_grSim_vision: false
 us_yellow: true
 us_positive: us_yellow
-send_to_grSim: true
+send_to_grSim: false
