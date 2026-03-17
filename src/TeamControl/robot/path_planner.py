@@ -76,8 +76,8 @@ def turn_toward(
     rel_target: Tuple[float, float],
     epsilon: float = 0.05,
     speed_scale: float = 1.0,
-    max_w: float = 9.0,
-    gain: float = 6.5,
+    max_w: float = 2.0,
+    gain: float = 2.0,
 ) -> float:
     """
     Smooth proportional angular velocity to face rel_target in robot frame.
@@ -91,8 +91,8 @@ def turn_toward(
     # Proportional control with minimum impulse for small angles
     w = speed_scale * gain * angle
     # Minimum angular velocity to overcome friction when close to target
-    if 0 < abs(w) < 1.2:
-        w = math.copysign(1.2, w)
+    if 0 < abs(w) < 0.5:
+        w = math.copysign(0.5, w)
     return clamp(w, -max_w, max_w)
 
 
