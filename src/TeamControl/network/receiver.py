@@ -116,22 +116,26 @@ class SSL_Multicast(Receiver):
             
     
     @staticmethod
-    def _get_local_ip() -> str:
-        """Get local LAN IP from ipconfig.yaml 'local_ip' field, fallback 192.168.1.2."""
+    def _get_vision_ip() -> str:
+        """Get vision network interface IP from ipconfig.yaml, fallback 192.168.1.2."""
         try:
             from TeamControl.utils.yaml_config import Config
             cfg = Config()
-            return cfg.local_ip
+            return cfg.vision_ip
         except Exception:
             return "192.168.1.2"
 
     def _add_group(self):
-        """adds group to multicast socket"""
+        """Joins multicast group on the vision network interface."""
         self.is_ready = False
-        local_ip = self._get_local_ip()
-        print(f"[Multicast] joining {self.group} on interface {local_ip}")
-        mreq = struct.pack("=4s4s", socket.inet_aton(self.group), socket.inet_aton(local_ip))
-        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        ip = self._get_vision_ip()
+        print(f"[Multicast] joining {self.group} on {ip}")
+        try:
+            mreq = struct.pack("=4s4s", socket.inet_aton(self.group), socket.inet_aton(ip))
+            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except OSError as e:
+            print(f"[Multicast] failed to join {self.group} on {ip}: {e}")
+            raise
         self.is_ready = True
         
     def listen(self) -> object | bytearray:
