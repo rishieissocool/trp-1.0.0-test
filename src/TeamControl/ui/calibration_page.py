@@ -10,20 +10,23 @@ Layout:
   +------------------------------+-----------------------+
 
 Tests:
-  Straight Line   Drive forward, measure lateral drift + stopping drift
+  Straight Line   Drive forward, correct lateral veer, measure drift
   Rectangle       Drive a rectangle, measure return-to-start error
   Rotation        Spin N turns, measure angular drift
   Velocity Sweep  Auto-run straight lines at increasing speeds
+  Auto Calibrate  Continuously run + auto-adjust stopping offsets
 """
 
+import json
 import math
+import os
 import time
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QPushButton, QFrame, QGridLayout, QDoubleSpinBox,
     QSpinBox, QComboBox, QGroupBox, QPlainTextEdit,
-    QSizePolicy, QCheckBox, QProgressBar,
+    QSizePolicy, QCheckBox, QProgressBar, QScrollArea,
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QColor
@@ -37,7 +40,7 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.network.sender import Sender
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.robot.constants import (
-    HALF_LEN, HALF_WID, FIELD_MARGIN,
+    HALF_LEN, HALF_WID, FIELD_MARGIN, _TUNING_PATH,
 )
 from TeamControl.world.transform_cords import world2robot
 
@@ -62,11 +65,16 @@ def _card(title_text):
 _SAFE_MARGIN = 400          # mm from field edge for waypoints
 _ARRIVE = 120               # mm — close enough to a waypoint
 _TURN_THRESH = 0.20         # rad — turn-in-place above this
-_NAV_SPEED = 0.20           # m/s default cruise speed
 _TURN_W = 0.15              # rad/s max turning speed
 _SETTLE_MS = 1500           # ms wait after stop to measure drift
 _RECT_W = 1800              # mm rectangle width
 _RECT_H = 1200              # mm rectangle height
+_LATERAL_GAIN = 0.0003      # vy correction per mm of lateral error
+
+# Auto-cal saves results here
+_CAL_DATA_PATH = os.path.normpath(os.path.join(
+    os.path.dirname(__file__), os.pardir, os.pardir, os.pardir,
+    "calibration.json"))
 
 
 class CalibrationPage(QWidget):
@@ -91,22 +99,35 @@ class CalibrationPage(QWidget):
         self._field = FieldCanvas()
         splitter.addWidget(self._field)
 
-        # Right: control sidebar
+        # Right: scrollable control sidebar
         sidebar = QWidget()
         sidebar.setMinimumWidth(360)
         sidebar.setMaximumWidth(520)
         sb_lay = QVBoxLayout(sidebar)
-        sb_lay.setContentsMargins(8, 8, 8, 8)
-        sb_lay.setSpacing(8)
+        sb_lay.setContentsMargins(0, 0, 0, 0)
+        sb_lay.setSpacing(0)
 
-        self._build_test_selector(sb_lay)
-        self._build_straight_card(sb_lay)
-        self._build_rect_card(sb_lay)
-        self._build_rotation_card(sb_lay)
-        self._build_sweep_card(sb_lay)
-        self._build_results_card(sb_lay)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"QScrollArea {{ background: {BG_DARK}; border: none; }}")
+        scroll_inner = QWidget()
+        scroll_inner.setStyleSheet(f"background: {BG_DARK};")
+        inner_lay = QVBoxLayout(scroll_inner)
+        inner_lay.setContentsMargins(8, 8, 8, 8)
+        inner_lay.setSpacing(8)
 
-        sb_lay.addStretch()
+        self._build_test_selector(inner_lay)
+        self._build_auto_card(inner_lay)
+        self._build_straight_card(inner_lay)
+        self._build_rect_card(inner_lay)
+        self._build_rotation_card(inner_lay)
+        self._build_sweep_card(inner_lay)
+        self._build_results_card(inner_lay)
+
+        inner_lay.addStretch()
+        scroll.setWidget(scroll_inner)
+        sb_lay.addWidget(scroll)
+
         splitter.addWidget(sidebar)
 
         splitter.setStretchFactor(0, 4)
@@ -125,18 +146,24 @@ class CalibrationPage(QWidget):
 
         # --- State ---
         self._phase = None       # current test phase
-        self._test_type = None   # "straight", "rect", "rotation", "sweep"
+        self._test_type = None   # "straight", "rect", "rotation", "sweep", "auto"
         self._waypoints = []     # list of (x, y) targets
         self._wp_idx = 0
         self._start_pose = None  # (x, y, o) at test start
         self._stop_pose = None   # (x, y, o) when we stopped
         self._leg_starts = []    # per-leg start positions for rectangle
+        self._line_y = 0.0       # ideal Y for straight line correction
         self._history: dict[str, list] = {
             "straight": [], "rect": [], "rotation": [], "sweep": [],
         }
         self._sweep_speeds = []
         self._sweep_idx = 0
         self._continuous = False
+
+        # Auto-calibration state
+        self._auto_run_count = 0
+        self._auto_direction = 1    # 1 = left-to-right, -1 = right-to-left
+        self._cal_data = self._load_cal_data()
 
         # Feed engine frames to our field
         self._frame_timer = QTimer(self)
@@ -195,12 +222,71 @@ class CalibrationPage(QWidget):
 
         parent_lay.addWidget(card)
 
+    # --- Auto Calibrate ---
+    def _build_auto_card(self, parent_lay):
+        card, lay = _card("Auto Calibrate")
+        lay.addWidget(QLabel(
+            "Continuously drives back and forth across the field, "
+            "corrects lateral veer, measures stopping drift at each speed, "
+            "and builds a calibration profile. Saves to calibration.json."))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("From:"))
+        self._auto_lo = QDoubleSpinBox()
+        self._auto_lo.setRange(0.05, 1.0)
+        self._auto_lo.setValue(0.10)
+        self._auto_lo.setSingleStep(0.05)
+        self._auto_lo.setSuffix(" m/s")
+        row.addWidget(self._auto_lo)
+        row.addWidget(QLabel("To:"))
+        self._auto_hi = QDoubleSpinBox()
+        self._auto_hi.setRange(0.10, 2.0)
+        self._auto_hi.setValue(0.50)
+        self._auto_hi.setSingleStep(0.05)
+        self._auto_hi.setSuffix(" m/s")
+        row.addWidget(self._auto_hi)
+        row.addWidget(QLabel("Step:"))
+        self._auto_step = QDoubleSpinBox()
+        self._auto_step.setRange(0.05, 0.5)
+        self._auto_step.setValue(0.10)
+        self._auto_step.setSingleStep(0.05)
+        self._auto_step.setSuffix(" m/s")
+        row.addWidget(self._auto_step)
+        lay.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Runs per speed:"))
+        self._auto_reps = QSpinBox()
+        self._auto_reps.setRange(1, 50)
+        self._auto_reps.setValue(3)
+        row2.addWidget(self._auto_reps)
+        lay.addLayout(row2)
+
+        btn = QPushButton("Start Auto Calibration")
+        btn.setObjectName("startBtn")
+        btn.setMinimumHeight(36)
+        btn.clicked.connect(self._start_auto)
+        lay.addWidget(btn)
+        self._auto_btn = btn
+
+        self._auto_result = QLabel("")
+        self._auto_result.setStyleSheet(f"color:{ACCENT}; font-size:11px;")
+        self._auto_result.setWordWrap(True)
+        lay.addWidget(self._auto_result)
+
+        self._auto_profile = QLabel(self._format_profile())
+        self._auto_profile.setStyleSheet(f"color:{TEXT_DIM}; font-size:10px;")
+        self._auto_profile.setWordWrap(True)
+        lay.addWidget(self._auto_profile)
+
+        parent_lay.addWidget(card)
+
     # --- Straight Line ---
     def _build_straight_card(self, parent_lay):
         card, lay = _card("Straight Line Test")
         lay.addWidget(QLabel(
-            "Drives left-to-right across the field. Measures lateral "
-            "drift and stopping distance."))
+            "Drives left-to-right across the field. Corrects lateral veer. "
+            "Measures lateral drift and stopping distance."))
         btn = QPushButton("Run Straight Line")
         btn.setObjectName("startBtn")
         btn.setMinimumHeight(32)
@@ -389,11 +475,9 @@ class CalibrationPage(QWidget):
         cmd = RobotCommand(
             robot_id=rid, vx=vx, vy=vy, w=w,
             kick=kick, dribble=dribble, isYellow=is_yellow)
-        # Send via test panel's connection (uses its IP/port settings)
         if self._test_panel:
             self._test_panel._do_send(cmd)
         else:
-            # Fallback: try grSim directly
             try:
                 if self._engine and self._engine._grsim_sender:
                     self._engine._grsim_sender.send_robot_command(cmd)
@@ -453,17 +537,23 @@ class CalibrationPage(QWidget):
     # Setup routines
     # ==================================================================
 
-    def _setup_straight(self):
+    def _setup_straight(self, direction=1):
         m = _SAFE_MARGIN
-        # Left to right across the field, centered vertically
-        self._waypoints = [
-            (-HALF_LEN + m, 0),     # start (left side)
-            (HALF_LEN - m, 0),      # end (right side)
-        ]
+        if direction == 1:
+            self._waypoints = [
+                (-HALF_LEN + m, 0),
+                (HALF_LEN - m, 0),
+            ]
+        else:
+            self._waypoints = [
+                (HALF_LEN - m, 0),
+                (-HALF_LEN + m, 0),
+            ]
         self._wp_idx = 0
-        self._phase = "nav"   # navigate to first waypoint, then "running"
+        self._phase = "nav"
+        self._line_y = 0.0  # will be set when we start the measured run
         self._field.set_targets(self._waypoints)
-        self._field.set_paths([])
+        self._field.set_paths([self._waypoints])
         self._set_status("Navigating to start position...", WARNING)
         self._progress.setValue(5)
         self._tick_timer.start()
@@ -473,24 +563,21 @@ class CalibrationPage(QWidget):
         rh = self._rect_h_spin.value()
         hw, hh = rw / 2, rh / 2
 
-        # Clamp to safe area
         max_x = HALF_LEN - _SAFE_MARGIN
         max_y = HALF_WID - _SAFE_MARGIN
         hw = min(hw, max_x)
         hh = min(hh, max_y)
 
-        # Rectangle corners (centered on field)
         self._waypoints = [
-            (-hw, -hh),   # bottom-left (start)
-            (hw, -hh),    # bottom-right
-            (hw, hh),     # top-right
-            (-hw, hh),    # top-left
-            (-hw, -hh),   # back to start
+            (-hw, -hh),
+            (hw, -hh),
+            (hw, hh),
+            (-hw, hh),
+            (-hw, -hh),
         ]
         self._wp_idx = 0
         self._phase = "nav"
         self._field.set_targets(self._waypoints)
-        # Show the rectangle path
         self._field.set_paths([self._waypoints])
         self._set_status("Navigating to start corner...", WARNING)
         self._progress.setValue(5)
@@ -527,9 +614,8 @@ class CalibrationPage(QWidget):
         self._sweep_idx = 0
         self._sweep_result.setText("")
         self._log_result(f"--- Velocity Sweep: "
-                         f"{self._sweep_speeds[0]:.2f} → "
+                         f"{self._sweep_speeds[0]:.2f} -> "
                          f"{self._sweep_speeds[-1]:.2f} m/s ---")
-        # Start the first straight-line run at the first speed
         self._speed_spin.setValue(self._sweep_speeds[0])
         self._setup_straight()
         self._test_type = "sweep"
@@ -547,7 +633,6 @@ class CalibrationPage(QWidget):
             self._tick_rotation(pose)
             return
 
-        # For straight / rect / sweep — waypoint navigation
         if self._phase == "nav":
             self._tick_nav_to_start(pose)
         elif self._phase == "running":
@@ -561,13 +646,13 @@ class CalibrationPage(QWidget):
         angle = math.atan2(rel[1], rel[0])
 
         if dist < _ARRIVE:
-            # Arrived at start — record pose and begin the measured run
             self._send_stop()
             self._start_pose = pose
             self._leg_starts = [pose]
+            # Record the Y we're starting at for lateral correction
+            self._line_y = pose[1]
             self._wp_idx += 1
             if self._wp_idx >= len(self._waypoints):
-                # Only one waypoint? Done.
                 self._finish_test(pose)
                 return
             self._phase = "running"
@@ -578,7 +663,6 @@ class CalibrationPage(QWidget):
             self._progress.setValue(20)
             return
 
-        # Turn then drive
         if abs(angle) > _TURN_THRESH:
             w = max(-_TURN_W, min(_TURN_W, angle * 0.3))
             self._send_cmd(w=w)
@@ -587,7 +671,7 @@ class CalibrationPage(QWidget):
             self._send_cmd(vx=speed)
 
     def _tick_running(self, pose):
-        """Drive through waypoints at the calibration speed, measuring."""
+        """Drive through waypoints at calibration speed with lateral correction."""
         target = self._waypoints[self._wp_idx]
         rel = world2robot(pose, target)
         dist = math.hypot(rel[0], rel[1])
@@ -597,16 +681,10 @@ class CalibrationPage(QWidget):
         pct = 20 + int(80 * self._wp_idx / max(1, wp_total - 1))
         self._progress.setValue(min(pct, 95))
 
-        # Check if this is the last waypoint — use stop zone for measuring
-        is_last = (self._wp_idx == wp_total - 1)
-
         if dist < _ARRIVE:
-            # Arrived at this waypoint
             self._leg_starts.append(pose)
-
             self._wp_idx += 1
             if self._wp_idx >= wp_total:
-                # Final waypoint — stop and settle
                 self._send_stop()
                 self._stop_pose = pose
                 self._phase = "settling"
@@ -616,20 +694,27 @@ class CalibrationPage(QWidget):
                 self._settle_timer.start(_SETTLE_MS)
                 return
 
+            # Update line_y for the next leg (use current Y as baseline)
+            self._line_y = pose[1]
             self._set_status(
                 f"Running — waypoint {self._wp_idx}/{wp_total - 1}...",
                 SUCCESS)
             return
 
-        # Navigate: turn then drive
         speed = self._speed_spin.value()
+
+        # Lateral correction: if veering off the ideal line, apply vy
+        lateral_err = pose[1] - self._line_y  # positive = drifted up
+        # Convert to robot frame: need to correct sideways
+        vy_correction = -lateral_err * _LATERAL_GAIN
+        vy_correction = max(-0.15, min(0.15, vy_correction))
+
         if abs(angle) > _TURN_THRESH:
             w = max(-_TURN_W, min(_TURN_W, angle * 0.3))
-            self._send_cmd(w=w)
+            self._send_cmd(w=w, vy=vy_correction)
         else:
-            # Deceleration ramp near waypoint
             ramp_speed = min(speed, max(0.03, (dist - _ARRIVE) / 1500.0))
-            self._send_cmd(vx=ramp_speed)
+            self._send_cmd(vx=ramp_speed, vy=vy_correction)
 
     def _tick_rotation(self, pose):
         """Spin and track accumulated rotation."""
@@ -637,7 +722,6 @@ class CalibrationPage(QWidget):
 
         if self._rot_last_angle is not None:
             delta = current_angle - self._rot_last_angle
-            # Normalize to [-pi, pi]
             while delta > math.pi:
                 delta -= 2 * math.pi
             while delta < -math.pi:
@@ -651,7 +735,6 @@ class CalibrationPage(QWidget):
         self._progress.setValue(pct)
 
         if abs(self._rot_accumulated) >= self._rot_target_rad:
-            # Done spinning — stop and settle
             self._send_stop()
             self._stop_pose = pose
             self._phase = "settling"
@@ -664,8 +747,8 @@ class CalibrationPage(QWidget):
         w = self._rot_speed.value()
         self._send_cmd(w=w)
         self._set_status(
-            f"Rotating: {math.degrees(self._rot_accumulated):.0f}° / "
-            f"{math.degrees(self._rot_target_rad):.0f}°", SUCCESS)
+            f"Rotating: {math.degrees(self._rot_accumulated):.0f} deg / "
+            f"{math.degrees(self._rot_target_rad):.0f} deg", SUCCESS)
 
     # ==================================================================
     # Settle + measurement
@@ -685,7 +768,7 @@ class CalibrationPage(QWidget):
         self._field.set_targets([])
         self._field.set_paths([])
 
-        if self._test_type == "straight" or self._test_type == "sweep":
+        if self._test_type in ("straight", "sweep", "auto"):
             self._measure_straight(final)
         elif self._test_type == "rect":
             self._measure_rect(final)
@@ -696,15 +779,9 @@ class CalibrationPage(QWidget):
         start = self._start_pose
         stop = self._stop_pose
 
-        # Stopping drift: how far the robot slid after we commanded stop
         stop_drift = math.hypot(
             final[0] - stop[0], final[1] - stop[1])
-
-        # Lateral drift: deviation from the straight line (start→target)
-        # The line is along X (y should stay ~0 for our centered paths)
         lateral_drift = abs(final[1] - start[1])
-
-        # Total run distance
         run_dist = math.hypot(
             stop[0] - start[0], stop[1] - start[1])
 
@@ -729,6 +806,9 @@ class CalibrationPage(QWidget):
         if self._test_type == "sweep":
             self._sweep_record(result)
             return
+        if self._test_type == "auto":
+            self._auto_record(result)
+            return
 
         self._set_status("Done", SUCCESS)
         self._phase = None
@@ -737,31 +817,23 @@ class CalibrationPage(QWidget):
     def _measure_rect(self, final):
         start = self._start_pose
 
-        # Return-to-start error
         return_err = math.hypot(
             final[0] - start[0], final[1] - start[1])
 
-        # Angular error (how much orientation drifted)
-        angle_err = abs(final[2] - start[2])
+        angle_err = final[2] - start[2]
         while angle_err > math.pi:
             angle_err -= 2 * math.pi
+        while angle_err < -math.pi:
+            angle_err += 2 * math.pi
         angle_err = abs(angle_err)
 
-        # Per-leg straightness: measure lateral deviation for each leg
         leg_drifts = []
         for i in range(len(self._leg_starts) - 1):
             s = self._leg_starts[i]
             e = self._leg_starts[i + 1]
-            # Leg direction
-            dx = e[0] - s[0]
-            dy = e[1] - s[1]
-            leg_len = math.hypot(dx, dy)
+            leg_len = math.hypot(e[0] - s[0], e[1] - s[1])
             if leg_len < 10:
                 continue
-            # Cross-track error (perpendicular distance from start→end line)
-            # Use the actual end point vs the ideal end
-            # For a rectangle, ideal is the waypoint — deviation is
-            # distance from the actual leg_start[i+1] to waypoints[i+1]
             wp = self._waypoints[i + 1] if i + 1 < len(self._waypoints) else e
             wp_err = math.hypot(e[0] - wp[0], e[1] - wp[1])
             leg_drifts.append(wp_err)
@@ -784,7 +856,7 @@ class CalibrationPage(QWidget):
         self._rect_result.setText(txt)
         self._log_result(
             f"[rect] {speed:.2f} m/s | return={return_err:.0f} | "
-            f"angle={math.degrees(angle_err):.1f}° | "
+            f"angle={math.degrees(angle_err):.1f} deg | "
             f"leg_err={avg_leg_err:.0f}")
 
         self._set_status("Done", SUCCESS)
@@ -794,13 +866,10 @@ class CalibrationPage(QWidget):
     def _measure_rotation(self, final):
         start = self._start_pose
 
-        # Position drift (should stay in place)
         pos_drift = math.hypot(
             final[0] - start[0], final[1] - start[1])
 
-        # Angular error: after N full turns, should be back to start angle
         angle_err = final[2] - start[2]
-        # Normalize
         while angle_err > math.pi:
             angle_err -= 2 * math.pi
         while angle_err < -math.pi:
@@ -823,7 +892,7 @@ class CalibrationPage(QWidget):
         self._log_result(
             f"[rotation] {n_turns}T @ {w_speed:.2f} | "
             f"pos_drift={pos_drift:.0f} | "
-            f"angle_err={math.degrees(angle_err):.1f}°")
+            f"angle_err={math.degrees(angle_err):.1f} deg")
 
         self._set_status("Done", SUCCESS)
         self._phase = None
@@ -834,29 +903,25 @@ class CalibrationPage(QWidget):
     # ==================================================================
 
     def _sweep_record(self, result):
-        """Record one sweep data point and start the next speed."""
         self._sweep_idx += 1
         n = len(self._sweep_speeds)
         pct = int(100 * self._sweep_idx / n)
         self._progress.setValue(pct)
 
         if self._sweep_idx >= n:
-            # Sweep complete — summarize
             self._sweep_summarize()
             self._phase = None
             self._test_type = None
             self._set_status("Sweep complete", SUCCESS)
             return
 
-        # Next speed
         next_speed = self._sweep_speeds[self._sweep_idx]
         self._speed_spin.setValue(next_speed)
         self._set_status(
             f"Sweep {self._sweep_idx + 1}/{n}: {next_speed:.2f} m/s...",
             WARNING)
-        # Re-run straight line at next speed
         self._setup_straight()
-        self._test_type = "sweep"  # setup_straight sets it to "straight"
+        self._test_type = "sweep"
 
     def _sweep_summarize(self):
         lines = ["--- Sweep Results ---"]
@@ -870,12 +935,163 @@ class CalibrationPage(QWidget):
         self._log_result(txt)
 
     # ==================================================================
+    # Auto-calibration
+    # ==================================================================
+
+    def _start_auto(self):
+        if self._phase is not None:
+            self._stop_test()
+
+        pose = self._get_robot_pose()
+        if pose is None:
+            self._set_status("No robot position — is the engine running?", DANGER)
+            return
+
+        # Build speed list
+        lo = self._auto_lo.value()
+        hi = self._auto_hi.value()
+        step = self._auto_step.value()
+        self._sweep_speeds = []
+        v = lo
+        while v <= hi + 0.001:
+            self._sweep_speeds.append(round(v, 3))
+            v += step
+        if not self._sweep_speeds:
+            self._set_status("Invalid speed range", DANGER)
+            return
+
+        self._auto_run_count = 0
+        self._auto_direction = 1
+        self._sweep_idx = 0
+        self._auto_reps_done = 0
+        self._test_type = "auto"
+        self._continuous = False  # auto handles its own repeat
+
+        self._log_result(f"--- Auto Calibration: "
+                         f"{self._sweep_speeds[0]:.2f} -> "
+                         f"{self._sweep_speeds[-1]:.2f} m/s, "
+                         f"{self._auto_reps.value()} reps each ---")
+
+        # Start the first run
+        self._speed_spin.setValue(self._sweep_speeds[0])
+        self._start_pose = pose
+        self._setup_straight(direction=self._auto_direction)
+        self._test_type = "auto"
+
+    def _auto_record(self, result):
+        """Record one auto-cal data point, then decide what's next."""
+        speed_key = f"{result['speed']:.2f}"
+
+        # Store in cal_data
+        if speed_key not in self._cal_data:
+            self._cal_data[speed_key] = {
+                "stop_drift": [], "lateral_drift": [],
+            }
+        self._cal_data[speed_key]["stop_drift"].append(result["stop_drift_mm"])
+        self._cal_data[speed_key]["lateral_drift"].append(result["lateral_drift_mm"])
+
+        self._auto_run_count += 1
+        self._auto_reps_done += 1
+        reps_needed = self._auto_reps.value()
+
+        # Update display
+        avg_stop = (sum(self._cal_data[speed_key]["stop_drift"])
+                    / len(self._cal_data[speed_key]["stop_drift"]))
+        avg_lat = (sum(self._cal_data[speed_key]["lateral_drift"])
+                   / len(self._cal_data[speed_key]["lateral_drift"]))
+        n = len(self._cal_data[speed_key]["stop_drift"])
+
+        self._auto_result.setText(
+            f"Run #{self._auto_run_count} | {result['speed']:.2f} m/s\n"
+            f"Stop drift: {result['stop_drift_mm']:.0f} mm "
+            f"(avg: {avg_stop:.0f}, n={n})\n"
+            f"Lateral: {result['lateral_drift_mm']:.0f} mm "
+            f"(avg: {avg_lat:.0f})")
+
+        self._auto_profile.setText(self._format_profile())
+
+        # Save after every run
+        self._save_cal_data()
+
+        # Check if we need more reps at this speed
+        if self._auto_reps_done < reps_needed:
+            # Same speed, flip direction
+            self._auto_direction *= -1
+            self._set_status(
+                f"Auto: {result['speed']:.2f} m/s — "
+                f"rep {self._auto_reps_done + 1}/{reps_needed}...", WARNING)
+            self._setup_straight(direction=self._auto_direction)
+            self._test_type = "auto"
+            return
+
+        # Move to next speed
+        self._sweep_idx += 1
+        self._auto_reps_done = 0
+
+        if self._sweep_idx >= len(self._sweep_speeds):
+            # All speeds done
+            self._save_cal_data()
+            self._phase = None
+            self._test_type = None
+            self._set_status(
+                f"Auto calibration complete — {self._auto_run_count} runs, "
+                f"saved to calibration.json", SUCCESS)
+            self._log_result(
+                f"[auto] Complete: {self._auto_run_count} runs across "
+                f"{len(self._sweep_speeds)} speeds")
+            self._auto_profile.setText(self._format_profile())
+            return
+
+        # Next speed
+        next_speed = self._sweep_speeds[self._sweep_idx]
+        self._speed_spin.setValue(next_speed)
+        self._auto_direction *= -1
+        n_total = len(self._sweep_speeds) * reps_needed
+        self._set_status(
+            f"Auto: {next_speed:.2f} m/s — "
+            f"run {self._auto_run_count + 1}/{n_total}...", WARNING)
+        self._setup_straight(direction=self._auto_direction)
+        self._test_type = "auto"
+
+    # ==================================================================
+    # Calibration data persistence
+    # ==================================================================
+
+    def _load_cal_data(self) -> dict:
+        try:
+            with open(_CAL_DATA_PATH, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_cal_data(self):
+        try:
+            with open(_CAL_DATA_PATH, "w") as f:
+                json.dump(self._cal_data, f, indent=2)
+        except Exception:
+            pass
+
+    def _format_profile(self):
+        if not self._cal_data:
+            return "No calibration data yet. Run Auto Calibrate to build a profile."
+        lines = ["Calibration Profile (from calibration.json):"]
+        lines.append(f"{'Speed':>8s}  {'Avg Stop':>9s}  {'Avg Lat':>8s}  {'Runs':>5s}")
+        for key in sorted(self._cal_data.keys(), key=float):
+            d = self._cal_data[key]
+            stops = d.get("stop_drift", [])
+            lats = d.get("lateral_drift", [])
+            avg_s = sum(stops) / len(stops) if stops else 0
+            avg_l = sum(lats) / len(lats) if lats else 0
+            n = len(stops)
+            lines.append(f"{key:>8s}  {avg_s:9.0f}  {avg_l:8.0f}  {n:5d}")
+        return "\n".join(lines)
+
+    # ==================================================================
     # Continuous repeat
     # ==================================================================
 
     def _maybe_repeat(self):
         if self._continuous and self._test_type is not None:
-            # Schedule restart after a short pause
             QTimer.singleShot(500, lambda: self._start_test(self._test_type))
         else:
             self._test_type = None
@@ -885,7 +1101,6 @@ class CalibrationPage(QWidget):
     # ==================================================================
 
     def _finish_test(self, pose):
-        """Called when all waypoints done but only one waypoint existed."""
         self._send_stop()
         self._stop_pose = pose
         self._phase = "settling"

@@ -977,7 +977,6 @@ class TestPanel(QWidget):
             if (self._action_mode == "go_to_ball_kick"
                     and self._last_ball_dist is not None
                     and self._last_ball_dist < 200):
-                # Ball occluded by robot — fire the kick
                 cmd = self._build_cmd(vx=0.3, vy=0, w=0, kick=1, dribble=0)
                 self._do_send(cmd)
             return
@@ -1002,18 +1001,18 @@ class TestPanel(QWidget):
         w = 0.0
 
         arrive_dist = 70  # mm — close enough to touch/kick
+        kick_dist = 150   # mm — close enough to fire kick (ball still visible)
 
-        if dist < arrive_dist:
-            # Right on the ball
-            if self._action_mode == "go_to_ball_kick":
-                if abs(angle) < 0.15:
-                    vx = 0.3
-                    kick = 1
-                else:
-                    w = max(-0.3, min(0.3, angle * 0.5))
+        if self._action_mode == "go_to_ball_kick" and dist < kick_dist:
+            # Close enough to kick — align and fire
+            if abs(angle) < 0.2:
+                vx = 0.3
+                kick = 1
             else:
-                # go_to_ball — just stop, we're there
-                pass
+                w = max(-0.3, min(0.3, angle * 0.5))
+        elif dist < arrive_dist:
+            # go_to_ball — just stop, we're there
+            pass
         elif abs(angle) > 0.2:
             # Turn to face ball first
             w = max(-0.4, min(0.4, angle * 0.5))
