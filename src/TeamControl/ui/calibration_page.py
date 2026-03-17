@@ -99,6 +99,9 @@ class CalibrationPage(QWidget):
         self._field = FieldCanvas()
         splitter.addWidget(self._field)
 
+        # Load cal data before building UI (format_profile needs it)
+        self._cal_data = self._load_cal_data()
+
         # Right: scrollable control sidebar
         sidebar = QWidget()
         sidebar.setMinimumWidth(360)
@@ -163,7 +166,6 @@ class CalibrationPage(QWidget):
         # Auto-calibration state
         self._auto_run_count = 0
         self._auto_direction = 1    # 1 = left-to-right, -1 = right-to-left
-        self._cal_data = self._load_cal_data()
 
         # Feed engine frames to our field
         self._frame_timer = QTimer(self)
