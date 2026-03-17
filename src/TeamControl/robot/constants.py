@@ -16,8 +16,9 @@ GOAL_WIDTH        = 1000
 GOAL_HW           = GOAL_WIDTH / 2
 GOAL_DEPTH        = 180
 
-PENALTY_DEPTH     = 1000
-PENALTY_WIDTH     = 2000
+PENALTY_DEPTH     = 500
+PENALTY_WIDTH     = 1000
+PENALTY_HW        = PENALTY_WIDTH / 2
 CENTER_RADIUS     = 500
 FIELD_MARGIN      = 300
 
@@ -55,7 +56,7 @@ KICK_DIST         = 175      # alias used by goalie
 BALL_NEAR         = 420      # "close to ball" threshold
 BEHIND_DIST       = 300      # lineup distance behind ball
 AVOID_RADIUS      = 400      # swing-around radius
-MAX_ADVANCE       = 1100     # goalie max advance off line
+MAX_ADVANCE       = PENALTY_DEPTH - 50  # goalie must stay inside penalty box
 
 PRESSURE_DIST     = 500      # mm — opponent "under pressure" radius
 PASS_CLEAR        = 400      # mm — pass lane clearance

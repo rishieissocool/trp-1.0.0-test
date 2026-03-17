@@ -18,6 +18,7 @@ from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, MAX_ADVANCE,
+    PENALTY_DEPTH, PENALTY_HW,
     DEFENSE_DEPTH, DEFENSE_HALF_WIDTH,
     SAVE_SPEED, POSITION_SPEED, CLEAR_SPEED, RETREAT_SPEED, DISTRIBUTE_SPEED,
     MAX_W, FACE_BALL_GAIN,
@@ -189,6 +190,17 @@ def _clear_direction(ball, goal_back_x):
     return (ball[0] + outward * 1500, side_y)
 
 
+def _clamp_to_penalty_box(x, y, goal_x):
+    """Hard-clamp a position to stay inside the penalty box."""
+    margin = 50
+    if goal_x > 0:
+        x = _clamp(x, goal_x - PENALTY_DEPTH + margin, goal_x - margin)
+    else:
+        x = _clamp(x, goal_x + margin, goal_x + PENALTY_DEPTH - margin)
+    y = _clamp(y, -PENALTY_HW + margin, PENALTY_HW - margin)
+    return x, y
+
+
 def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
     frame = None
     last_ft = 0.0
@@ -282,8 +294,8 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
         d_ball = math.hypot(rel_ball[0], rel_ball[1])
         ball_dist = abs(ball[0] - goal_back_x)
 
-        ball_in_box = (ball_dist < DEFENSE_DEPTH
-                       and abs(ball[1]) < DEFENSE_HALF_WIDTH)
+        ball_in_box = (ball_dist < PENALTY_DEPTH
+                       and abs(ball[1]) < PENALTY_HW)
         ball_slow = ball_speed < CLEAR_BALL_SPEED
 
         # Collect opponent positions for pass lane checks
@@ -391,6 +403,10 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
         else:
             smooth_x += smooth_alpha * (raw_target[0] - smooth_x)
             smooth_y += smooth_alpha * (raw_target[1] - smooth_y)
+
+        # Hard clamp — goalie must never leave the penalty box
+        smooth_x, smooth_y = _clamp_to_penalty_box(
+            smooth_x, smooth_y, goal_back_x)
         target = (smooth_x, smooth_y)
 
         rel_target = world2robot(rpos, target)

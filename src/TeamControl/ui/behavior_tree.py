@@ -11,10 +11,12 @@ import math
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                 QComboBox, QScrollArea, QGroupBox,
                                 QGridLayout, QDoubleSpinBox, QFrame,
-                                QSplitter, QSizePolicy, QToolTip)
+                                QSplitter, QSizePolicy, QToolTip,
+                                QPushButton)
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QSize
 from PySide6.QtGui import (QPainter, QPen, QBrush, QColor, QFont,
-                           QPainterPath, QMouseEvent, QPaintEvent)
+                           QPainterPath, QMouseEvent, QPaintEvent,
+                           QWheelEvent, QTransform)
 
 from TeamControl.ui.theme import (ACCENT, BG_DARK, BG_MID, BG_PANEL,
                                    BORDER, TEXT, TEXT_DIM, SUCCESS,
@@ -261,10 +263,11 @@ KIND_SYMBOLS = {
 
 # ── Tree rendering widget ────────────────────────────────────────────
 
-NODE_W = 180
-NODE_H = 44
-H_GAP  = 24
-V_GAP  = 60
+NODE_W = 200
+NODE_H = 48
+H_GAP  = 28
+V_GAP  = 72
+CANVAS_PADDING = 32
 
 
 def _layout_tree(node: BTNode, x=0, depth=0) -> float:
@@ -289,7 +292,7 @@ def _layout_tree(node: BTNode, x=0, depth=0) -> float:
 
 
 class _TreeCanvas(QWidget):
-    """Draws a single behaviour tree."""
+    """Draws a single behaviour tree with zoom and pan."""
 
     node_selected = Signal(object)  # BTNode
 
@@ -297,15 +300,26 @@ class _TreeCanvas(QWidget):
         super().__init__(parent)
         self._root: BTNode | None = None
         self._hovered: BTNode | None = None
+        self._selected: BTNode | None = None
+        self._scale = 1.0
+        self._offset = QPointF(0, 0)
+        self._base_size = QSize(800, 500)
         self.setMouseTracking(True)
+        self.setMinimumSize(400, 300)
 
     def set_tree(self, root: BTNode):
         self._root = root
+        self._selected = None
+        self._scale = 1.0
+        self._offset = QPointF(0, 0)
         if root:
-            _layout_tree(root, 20, 0)
+            _layout_tree(root, CANVAS_PADDING, 0)
             br = self._bounding_rect(root)
-            self.setMinimumSize(int(br.width()) + 40,
-                                int(br.height()) + 40)
+            self._base_size = QSize(int(br.width()) + CANVAS_PADDING * 2,
+                                    int(br.height()) + CANVAS_PADDING * 2)
+            self.setMinimumSize(
+                min(500, self._base_size.width() + 80),
+                min(400, self._base_size.height() + 80))
         self.update()
 
     def _bounding_rect(self, node: BTNode) -> QRectF:
@@ -314,12 +328,32 @@ class _TreeCanvas(QWidget):
             r = r.united(self._bounding_rect(c))
         return r
 
+    def _view_transform(self) -> QTransform:
+        t = QTransform()
+        t.translate(self.width() / 2 + self._offset.x(),
+                    self.height() / 2 + self._offset.y())
+        t.scale(self._scale, self._scale)
+        t.translate(-self._base_size.width() / 2, -self._base_size.height() / 2)
+        return t
+
+    def _widget_to_canvas(self, pos: QPointF) -> QPointF:
+        inv, ok = self._view_transform().inverted()
+        return inv.map(pos) if ok else pos
+
     def paintEvent(self, ev: QPaintEvent):
         if not self._root:
+            p = QPainter(self)
+            p.fillRect(self.rect(), QColor(BG_DARK))
+            p.setPen(QColor(TEXT_DIM))
+            p.setFont(QFont("Segoe UI", 12))
+            p.drawText(self.rect(), Qt.AlignCenter, "Select a role to view its behavior tree")
+            p.end()
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.fillRect(self.rect(), QColor(BG_DARK))
+        p.setTransform(self._view_transform())
         self._draw_node(p, self._root)
         p.end()
 
@@ -329,43 +363,48 @@ class _TreeCanvas(QWidget):
 
         if node.active:
             color = QColor(SUCCESS)
-        if node is self._hovered:
-            color = color.lighter(130)
+        elif node is self._hovered:
+            color = color.lighter(125)
+        if node is self._selected:
+            color = color.lighter(115)
+            border_color = QColor(ACCENT)
+        else:
+            border_color = color.darker(150)
 
-        # Connections to children
+        # Connections to children (smooth lines)
         pen = QPen(QColor(BORDER), 2)
         p.setPen(pen)
         for child in node.children:
             p.drawLine(r.center().x(), r.bottom(),
                        child.rect.center().x(), child.rect.top())
 
-        # Node rectangle
+        # Node rectangle with subtle rounding
         path = QPainterPath()
-        path.addRoundedRect(r, 8, 8)
+        path.addRoundedRect(r, 10, 10)
         p.fillPath(path, QBrush(color))
-        p.setPen(QPen(color.darker(150), 2))
+        p.setPen(QPen(border_color, 2 if node is self._selected else 1.5))
         p.drawPath(path)
 
         # Symbol + text
         p.setPen(QPen(QColor("#ffffff"), 1))
         sym = KIND_SYMBOLS.get(node.kind, "")
-        font = QFont("Segoe UI", 9, QFont.Bold)
+        font = QFont("Segoe UI", 10, QFont.Bold)
         p.setFont(font)
         text = f"{sym} {node.name}"
-        p.drawText(r.adjusted(6, 0, -6, 0), Qt.AlignVCenter | Qt.AlignLeft,
+        p.drawText(r.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft,
                    text)
 
         # Param indicator
         if node.params:
-            p.setPen(QPen(QColor(WARNING), 1))
-            p.setFont(QFont("Segoe UI", 7))
-            p.drawText(r.adjusted(0, 0, -6, -2), Qt.AlignBottom | Qt.AlignRight,
-                       f"[{len(node.params)} params]")
+            p.setPen(QPen(QColor("#fff8dc"), 1))
+            p.setFont(QFont("Segoe UI", 8))
+            p.drawText(r.adjusted(0, 0, -8, -4), Qt.AlignBottom | Qt.AlignRight,
+                       f"⋮ {len(node.params)}")
 
         for child in node.children:
             self._draw_node(p, child)
 
-    def _hit_test(self, pos, node: BTNode) -> BTNode | None:
+    def _hit_test(self, pos: QPointF, node: BTNode) -> BTNode | None:
         if node.rect.contains(pos):
             return node
         for c in node.children:
@@ -374,55 +413,129 @@ class _TreeCanvas(QWidget):
                 return hit
         return None
 
+    def _node_at_widget_pos(self, pos: QPointF) -> BTNode | None:
+        if not self._root:
+            return None
+        canvas_pt = self._widget_to_canvas(pos)
+        return self._hit_test(canvas_pt, self._root)
+
     def mouseMoveEvent(self, ev: QMouseEvent):
         if not self._root:
             return
-        pt = QPointF(ev.position())
-        hit = self._hit_test(pt, self._root)
+        hit = self._node_at_widget_pos(QPointF(ev.position()))
         if hit != self._hovered:
             self._hovered = hit
             self.update()
-        if hit and hit.description:
-            QToolTip.showText(ev.globalPosition().toPoint(), hit.description)
+        if hit:
+            tip = hit.name
+            if hit.description:
+                tip += "\n\n" + hit.description
+            QToolTip.showText(ev.globalPosition().toPoint(), tip)
 
     def mousePressEvent(self, ev: QMouseEvent):
         if not self._root or ev.button() != Qt.LeftButton:
             return
-        hit = self._hit_test(QPointF(ev.position()), self._root)
+        hit = self._node_at_widget_pos(QPointF(ev.position()))
         if hit:
+            self._selected = hit
             self.node_selected.emit(hit)
+            self.update()
+
+    def wheelEvent(self, ev: QWheelEvent):
+        if not self._root:
+            return
+        delta = ev.angleDelta().y()
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        self._scale = max(0.4, min(2.0, self._scale * factor))
+        self.update()
+        ev.accept()
+
+    def zoom_in(self):
+        self._scale = min(2.0, self._scale * 1.2)
+        self.update()
+
+    def zoom_out(self):
+        self._scale = max(0.4, self._scale / 1.2)
+        self.update()
+
+    def zoom_fit(self):
+        self._scale = 1.0
+        self._offset = QPointF(0, 0)
+        self.update()
 
 
 # ── Parameter editor ─────────────────────────────────────────────────
 
 class _ParamEditor(QWidget):
+    """Side panel to view and edit the selected node's parameters and description."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(4, 4, 4, 4)
-        self._header = QLabel("Select a node to edit parameters")
-        self._header.setWordWrap(True)
-        self._header.setStyleSheet(f"color:{TEXT_DIM}; padding:8px;")
-        self._layout.addWidget(self._header)
-        self._grid_widget = QWidget()
-        self._grid = QGridLayout(self._grid_widget)
-        self._layout.addWidget(self._grid_widget)
-        self._layout.addStretch()
+        self.setMinimumWidth(240)
+        self.setMaximumWidth(400)
         self._spinners = {}
 
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Card frame for the whole editor
+        card = QFrame()
+        card.setObjectName("btEditorCard")
+        card.setStyleSheet(f"""
+            QFrame#btEditorCard {{
+                background: {BG_PANEL};
+                border: 1px solid {BORDER};
+                border-radius: 8px;
+                padding: 0;
+            }}
+        """)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(12, 12, 12, 12)
+        card_layout.setSpacing(10)
+
+        self._header = QLabel("Click a node to view or edit its parameters")
+        self._header.setWordWrap(True)
+        self._header.setStyleSheet(f"""
+            color: {TEXT_DIM};
+            font-size: 12px;
+            padding: 4px 0;
+            line-height: 1.35;
+        """)
+        self._header.setMinimumHeight(44)
+        card_layout.addWidget(self._header)
+
+        # Scrollable param grid
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        self._grid_widget = QWidget()
+        self._grid_widget.setStyleSheet("background: transparent;")
+        self._grid = QGridLayout(self._grid_widget)
+        self._grid.setSpacing(8)
+        self._grid.setContentsMargins(0, 4, 0, 0)
+        scroll.setWidget(self._grid_widget)
+        card_layout.addWidget(scroll, 1)
+
+        outer.addWidget(card)
+
     def show_node(self, node: BTNode):
-        # Clear old
+        # Clear old widgets
         while self._grid.count():
-            w = self._grid.takeAt(0).widget()
+            item = self._grid.takeAt(0)
+            w = item.widget()
             if w:
                 w.deleteLater()
         self._spinners.clear()
 
-        desc = node.description or ""
+        kind_label = node.kind.replace("_", " ").capitalize()
+        desc = (node.description or "No description.").strip()
         self._header.setText(
-            f"<b style='color:{ACCENT}'>{node.name}</b> "
-            f"<span style='color:{TEXT_DIM}'>({node.kind})</span><br>"
-            f"<span style='color:{TEXT_DIM}'>{desc}</span>")
+            f"<div style='color:{ACCENT}; font-weight:bold; font-size:13px; margin-bottom:4px;'>{node.name}</div>"
+            f"<div style='color:{TEXT_DIM}; font-size:11px;'>{kind_label}</div>"
+            f"<div style='color:{TEXT_DIM}; font-size:11px; margin-top:6px;'>{desc}</div>")
 
         if not node.params:
             return
@@ -430,12 +543,14 @@ class _ParamEditor(QWidget):
         row = 0
         for key, val in node.params.items():
             lbl = QLabel(key)
-            lbl.setStyleSheet("font-weight:bold;")
+            lbl.setStyleSheet(f"color: {TEXT}; font-weight: bold; font-size: 12px;")
+            lbl.setToolTip(key)
             spin = QDoubleSpinBox()
             spin.setRange(-99999, 99999)
             spin.setDecimals(3)
             spin.setValue(float(val))
-            spin.setSingleStep(0.1 if val < 10 else 10)
+            spin.setSingleStep(0.1 if abs(val) < 10 else 10)
+            spin.setMinimumHeight(28)
             self._grid.addWidget(lbl, row, 0)
             self._grid.addWidget(spin, row, 1)
             self._spinners[key] = spin
@@ -450,54 +565,81 @@ class BehaviorTreePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(4)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
 
-        # Header
+        # Canvas first (needed for zoom button connections)
+        self._canvas = _TreeCanvas()
+
+        # Header bar: title + role + zoom
         hdr = QHBoxLayout()
+        hdr.setSpacing(16)
         title = QLabel("Behavior Tree")
-        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{ACCENT};")
+        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {ACCENT};")
         hdr.addWidget(title)
-        hdr.addStretch()
 
         hdr.addWidget(QLabel("Role:"))
         self._role_combo = QComboBox()
         self._role_combo.addItems(list(ROLE_TREES.keys()))
+        self._role_combo.setMinimumWidth(140)
         self._role_combo.currentTextChanged.connect(self._on_role_changed)
         hdr.addWidget(self._role_combo)
-        lay.addLayout(hdr)
 
-        # Splitter: tree canvas | param editor
-        splitter = QSplitter(Qt.Horizontal)
+        hdr.addSpacing(20)
+        zoom_lbl = QLabel("Zoom:")
+        zoom_lbl.setStyleSheet(f"color: {TEXT_DIM};")
+        hdr.addWidget(zoom_lbl)
+        zoom_out_btn = QPushButton("−")
+        zoom_out_btn.setFixedSize(28, 28)
+        zoom_out_btn.setToolTip("Zoom out")
+        zoom_out_btn.clicked.connect(self._canvas.zoom_out)
+        hdr.addWidget(zoom_out_btn)
+        zoom_fit_btn = QPushButton("Fit")
+        zoom_fit_btn.setFixedSize(36, 28)
+        zoom_fit_btn.setToolTip("Reset zoom")
+        zoom_fit_btn.clicked.connect(self._canvas.zoom_fit)
+        hdr.addWidget(zoom_fit_btn)
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setFixedSize(28, 28)
+        zoom_in_btn.setToolTip("Zoom in")
+        zoom_in_btn.clicked.connect(self._canvas.zoom_in)
+        hdr.addWidget(zoom_in_btn)
 
-        # Scrollable tree
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self._canvas = _TreeCanvas()
-        scroll.setWidget(self._canvas)
-        splitter.addWidget(scroll)
+        hdr.addStretch()
 
-        # Param editor
-        self._editor = _ParamEditor()
-        self._editor.setMinimumWidth(220)
-        self._editor.setMaximumWidth(320)
-        splitter.addWidget(self._editor)
-
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        lay.addWidget(splitter)
-
-        self._canvas.node_selected.connect(self._editor.show_node)
-
-        # Legend
+        # Legend (compact)
         legend = QHBoxLayout()
+        legend.setSpacing(14)
         for kind, col in KIND_COLORS.items():
             sym = KIND_SYMBOLS[kind]
             legend.addWidget(QLabel(
                 f'<span style="color:{col}; font-weight:bold;">{sym}</span> '
-                f'{kind.capitalize()}'))
+                f'<span style="color:{TEXT_DIM}; font-size:11px;">{kind.capitalize()}</span>'))
         legend.addStretch()
-        lay.addLayout(legend)
+        hdr.addLayout(legend)
+        lay.addLayout(hdr)
+
+        # Splitter: tree (scroll) | param editor
+        splitter = QSplitter(Qt.Horizontal)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background: transparent;")
+        scroll.setWidget(self._canvas)
+        scroll.setMinimumWidth(400)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        splitter.addWidget(scroll)
+
+        self._editor = _ParamEditor()
+        splitter.addWidget(self._editor)
+
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([700, 280])  # initial split
+        lay.addWidget(splitter, 1)
+
+        self._canvas.node_selected.connect(self._editor.show_node)
 
         # Load default
         self._on_role_changed(self._role_combo.currentText())

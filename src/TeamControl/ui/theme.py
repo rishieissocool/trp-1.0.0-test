@@ -279,6 +279,16 @@ QStatusBar {{
     padding: 2px 8px;
 }}
 
+/* ── Tooltip (e.g. field hover coordinates) ───────────────────── */
+QToolTip {{
+    background: #f5f5f5;
+    color: #000000;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+}}
+
 /* ── CheckBox ─────────────────────────────────────────────────── */
 QCheckBox::indicator {{
     width: 16px;

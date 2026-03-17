@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QPointF
 from PySide6.QtGui import QAction, QFont, QIcon
 
-from TeamControl.ui.theme import QSS, ACCENT, TEXT_DIM, SUCCESS, DANGER, WARNING
+from TeamControl.ui.theme import QSS, ACCENT, TEXT, TEXT_DIM, SUCCESS, DANGER, WARNING
 from TeamControl.ui.engine import SimEngine
 from TeamControl.ui.field_canvas import FieldCanvas
 from TeamControl.ui.dashboard_page import DashboardPage
@@ -74,7 +74,7 @@ class MainWindow(QMainWindow):
         self._status_mode = QLabel("Mode: —")
         self._status_mode.setStyleSheet(f"color:{TEXT_DIM}; padding:0 12px;")
         self._status_coords = QLabel("(—, —)")
-        self._status_coords.setStyleSheet(f"color:{TEXT_DIM}; padding:0 12px;")
+        self._status_coords.setStyleSheet(f"color:{TEXT}; padding:0 12px;")
         self._status_fps = QLabel("0 fps")
         self._status_fps.setStyleSheet(f"color:{TEXT_DIM}; padding:0 12px;")
 

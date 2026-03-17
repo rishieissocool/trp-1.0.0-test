@@ -25,7 +25,8 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
-    GOAL_WIDTH, GOAL_HW,
+    GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
+    PENALTY_DEPTH, PENALTY_HW,
     DEFENSE_DEPTH, DEFENSE_HALF_WIDTH,
     MAX_W, TURN_GAIN,
     KICK_RANGE, BALL_NEAR, BEHIND_DIST, AVOID_RADIUS,
@@ -168,6 +169,11 @@ def _in_def(x, y, gx):
     return abs(x - gx) < DEF_DEPTH and abs(y) < DEF_HW
 
 
+def _in_penalty(x, y, gx):
+    """True if (x, y) is inside the penalty box around goal at gx."""
+    return abs(x - gx) < PENALTY_DEPTH and abs(y) < PENALTY_HW
+
+
 def _field_clamp(x, y):
     return (_cl(x, -HALF_LEN + FIELD_MARGIN, HALF_LEN - FIELD_MARGIN),
             _cl(y, -HALF_WID + FIELD_MARGIN, HALF_WID - FIELD_MARGIN))
@@ -193,11 +199,13 @@ def _push_out_def(x, y, our_gx):
 
 
 def _gk_clamp(x, y, gx):
+    """Clamp goalie position to stay inside the penalty box."""
+    margin = 50
     if gx > 0:
-        x = _cl(x, gx - DEF_DEPTH + 80, gx - 50)
+        x = _cl(x, gx - PENALTY_DEPTH + margin, gx - margin)
     else:
-        x = _cl(x, gx + 50, gx + DEF_DEPTH - 80)
-    return x, _cl(y, -DEF_HW + 80, DEF_HW - 80)
+        x = _cl(x, gx + margin, gx + PENALTY_DEPTH - margin)
+    return x, _cl(y, -PENALTY_HW + margin, PENALTY_HW - margin)
 
 
 def _safe_pos(x, y, our_gx, opp_gx):
@@ -362,10 +370,14 @@ def _through_ball_score(ball, mate_pos, mate_vel_est, opps, opp_gx):
 
 
 def _pick_shot_target(ball, opp_gx, gk_pos):
-    h = GOAL_HW * 0.40
+    # Aim past the goal line into the net so the ball enters through the
+    # open face, not into the side walls of the [ shaped goal.
+    aim_inward = 1 if opp_gx > 0 else -1
+    aim_x = opp_gx + aim_inward * (GOAL_DEPTH * 0.5)
+    h = GOAL_HW * 0.35
     if gk_pos:
-        return (opp_gx, -h) if gk_pos[1] > 0 else (opp_gx, h)
-    return (opp_gx, -h * 0.6) if ball[1] > 0 else (opp_gx, h * 0.6)
+        return (aim_x, -h) if gk_pos[1] > 0 else (aim_x, h)
+    return (aim_x, -h * 0.6) if ball[1] > 0 else (aim_x, h * 0.6)
 
 
 def _best_pass(ball, rid, our, opps, opp_gx):
@@ -692,12 +704,12 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
     d_ball = math.hypot(rel_ball[0], rel_ball[1])
     atk = 1 if opp_gx > 0 else -1
 
-    # Ball in a defense area → field players wait outside
+    # Ball in a penalty box → field players can't enter
     for gx in (our_gx, opp_gx):
-        if _in_def(ball[0], ball[1], gx):
+        if _in_penalty(ball[0], ball[1], gx):
             inw = -1 if gx > 0 else 1
-            wait = (gx + inw * (DEF_DEPTH + DEF_MARGIN + 50),
-                    _cl(ball[1], -DEF_HW, DEF_HW))
+            wait = (gx + inw * (PENALTY_DEPTH + 120),
+                    _cl(ball[1], -PENALTY_HW, PENALTY_HW))
             return _cmd(rid, rpos, wait, ball, SPD_CRUISE, 0, 0, yellow)
 
     # Evaluate options
@@ -739,6 +751,11 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
     #  POSSESS — ball in kicker range
     # ══════════════════════════════════════════════════════════
     if d_ball < KICK_RANGE and rel_ball[0] > -60:
+        ang_ball = math.atan2(rel_ball[1], rel_ball[0])
+        if abs(ang_ball) > 0.45:
+            # Ball is to the side — face it first so the kicker can contact
+            return _cmd(rid, rpos, ball, ball, SPD_DRIBBLE, 0, 1, yellow)
+
         ra = world2robot(rpos, aim)
         ang = abs(math.atan2(ra[1], ra[0]))
 
@@ -795,7 +812,7 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
     if d_ball < BALL_NEAR:
         ra = world2robot(rpos, aim)
         if abs(math.atan2(ra[1], ra[0])) < 0.60:
-            return _cmd(rid, rpos, ball, aim, SPD_APPROACH, 0, 1, yellow)
+            return _cmd(rid, rpos, ball, ball, SPD_APPROACH, 0, 1, yellow)
 
     # Speed selection — counter-attack gets sprint speed
     if poss_state == 'COUNTER':
@@ -808,7 +825,7 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
         speed = SPD_APPROACH
     drib = 1 if d_ball < BALL_NEAR else 0
 
-    return _cmd(rid, rpos, nav, aim, speed, 0, drib, yellow)
+    return _cmd(rid, rpos, nav, ball, speed, 0, drib, yellow)
 
 
 # ════════════════════════════════════════════════════════════════════
