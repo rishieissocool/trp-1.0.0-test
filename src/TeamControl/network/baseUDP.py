@@ -143,27 +143,40 @@ class BaseSocket():
     @staticmethod
     def _obtain_sys_ip() -> str:
         """
-        Obtaining system's ip address *This may not work in Arch linux
-        Params:
-            os_system(sys.platform) =  current os_system.
+        Obtain the system's LAN IP address.
+
+        Works on Windows, Linux (including Arch), and macOS by opening a
+        dummy UDP socket to a public address.  No data is actually sent.
+
+        Falls back to socket.gethostbyname if the dummy-socket trick fails.
+
         Raises:
-            ValueError: No matching os system, cannot obtain IP, will need to input manually.
+            ValueError: Could not determine a usable IP address.
         Returns:
             ip (str): system's ip address
         """
-        os_system = sys.platform
-        match os_system:
-            case 'win32':
-                ip = socket.gethostbyname(socket.gethostname())
-            case 'linux':
-                ip = os.popen('hostname -I').read().strip().split(" ")[0]
-                # ip = os.popen('hostname -I').read().strip().split(" ")[1] # for jetsons
-                print(f'available : {os.popen("hostname -I").read().strip().split(" ")} , using : {ip}')
-            case 'darwin':
-                ip = os.popen('ipconfig getifaddr en0').read().strip()
-            case _:
-                raise ValueError("Cannot Obtain IP, Please input ip address manually")       
-        return ip
+        # Preferred: let the OS routing table tell us which interface is active
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                if ip and not ip.startswith("127."):
+                    return ip
+        except OSError:
+            pass
+
+        # Fallback: resolve hostname (can return 127.x on some setups)
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+            if ip and not ip.startswith("127."):
+                return ip
+        except socket.gaierror:
+            pass
+
+        raise ValueError(
+            "Cannot determine LAN IP automatically. "
+            "Please pass an ip address manually."
+        )
     
     @staticmethod
     def _generate_port() -> int:
