@@ -22,7 +22,7 @@ yellow:
     has_chip_kick: false
 
   D:
-    ip: "127.0.0.1"
+    ip: "192.168.1.4"
     port: 50514
     grSimID : 3
     shellID : 3 
@@ -67,7 +67,7 @@ blue:
     has_chip_kick: false
 
   D:
-    ip: "192.168.1.4"
+    ip: "127.0.0.1"
     port: 50514
     grSimID : 3
     shellID : 3 
