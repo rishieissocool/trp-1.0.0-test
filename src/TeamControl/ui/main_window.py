@@ -50,7 +50,7 @@ class MainWindow(QMainWindow):
         self._dashboard = DashboardPage(
             self._field, engine=self._engine, test_panel=self._test_panel)
         self._bt_panel = BehaviorTreePanel()
-        self._dispatch_panel = DispatcherPanel()
+        self._dispatch_panel = DispatcherPanel(engine=self._engine)
         self._calibration = CalibrationPage(
             engine=self._engine, test_panel=self._test_panel)
         self._settings = SettingsPage()

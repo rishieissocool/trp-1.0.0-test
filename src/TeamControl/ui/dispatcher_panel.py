@@ -51,10 +51,12 @@ class DispatcherPanel(QWidget):
 
     SHELL_COLS = ["Shell ID", "grSim ID", "IP Address", "Port"]
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, engine=None):
         super().__init__(parent)
+        self._engine = engine
         self._last_info = None
         self._build_ui()
+        self._load_shell_maps()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -184,6 +186,7 @@ class DispatcherPanel(QWidget):
         if running:
             self._state_lbl.setText("RUNNING")
             self._state_lbl.setStyleSheet(f"color:{SUCCESS}; font-weight:bold;")
+            self._load_shell_maps()
         else:
             self._state_lbl.setText("IDLE")
             self._state_lbl.setStyleSheet(f"color:{TEXT_DIM};")
@@ -289,3 +292,37 @@ class DispatcherPanel(QWidget):
                     item.setForeground(color)
                     item.setFont(QFont("Segoe UI", 10, QFont.Bold))
                 table.setItem(row, col, item)
+
+    def _load_shell_maps(self):
+        """Load shell maps from ipconfig.yaml on startup so the panel
+        always has something to show even before the dispatcher runs."""
+        try:
+            from TeamControl.utils.yaml_config import Config
+            cfg = Config()
+            y_shells = {}
+            if cfg.yellow:
+                for rkey, rdict in cfg.yellow.items():
+                    sid = rdict.get("shellID")
+                    if sid is not None:
+                        y_shells[sid] = {
+                            "ip": rdict.get("ip", "?"),
+                            "port": rdict.get("port", "?"),
+                            "grSimID": rdict.get("grSimID", "?"),
+                        }
+            b_shells = {}
+            if cfg.blue:
+                for rkey, rdict in cfg.blue.items():
+                    sid = rdict.get("shellID")
+                    if sid is not None:
+                        b_shells[sid] = {
+                            "ip": rdict.get("ip", "?"),
+                            "port": rdict.get("port", "?"),
+                            "grSimID": rdict.get("grSimID", "?"),
+                        }
+            self._update_shell_table(self._yellow_table, y_shells, YELLOW_TEAM)
+            self._update_shell_table(self._blue_table, b_shells, BLUE_TEAM)
+            self._grsim_lbl.setText("YES" if cfg.send_to_grSim else "NO")
+            self._grsim_lbl.setStyleSheet(
+                f"color:{SUCCESS if cfg.send_to_grSim else TEXT_DIM}; font-weight:bold;")
+        except Exception:
+            pass
