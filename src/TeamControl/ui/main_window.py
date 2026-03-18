@@ -93,6 +93,9 @@ class MainWindow(QMainWindow):
         # ── Wire signals ─────────────────────────────────────────
         self._wire_signals()
 
+        # Show cal card for the default selected mode right away
+        self._on_mode_combo_changed(self._mode_combo.currentText())
+
         # ── Boot log ─────────────────────────────────────────────
         self._log_panel.append("[engine] TurtleRabbit Command Center ready")
         self._log_panel.append("[engine] Select a mode and click Start")
@@ -114,6 +117,7 @@ class MainWindow(QMainWindow):
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(SimEngine.MODES)
         self._mode_combo.setMinimumWidth(130)
+        self._mode_combo.currentTextChanged.connect(self._on_mode_combo_changed)
         tb.addWidget(self._mode_combo)
         tb.addSeparator()
 
@@ -261,6 +265,9 @@ class MainWindow(QMainWindow):
             lambda: self._log_panel.append("[config] Configuration saved"))
 
     # ── Handlers ─────────────────────────────────────────────────
+
+    def _on_mode_combo_changed(self, mode):
+        self._dashboard.set_mode(mode)
 
     def _on_start(self):
         mode = self._mode_combo.currentText()

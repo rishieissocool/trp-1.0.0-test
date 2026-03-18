@@ -129,6 +129,7 @@ class DashboardPage(QWidget):
         # FPS tracking
         self._frame_times: list[float] = []
         self._last_frame_time = 0.0
+        self._current_mode = "vision_only"
 
     # ── Robot table ───────────────────────────────────────────────
 
@@ -350,9 +351,11 @@ class DashboardPage(QWidget):
         self._gs_state.setStyleSheet(f"color:{c}; font-weight:bold;")
 
     def set_mode(self, mode):
+        self._current_mode = mode
         self._gs_mode.setText(mode.upper())
-        self._cal_card.setVisible(mode != "vision_only")
-        if mode != "vision_only":
+        show_cal = mode != "vision_only"
+        self._cal_card.setVisible(show_cal)
+        if show_cal:
             self._load_cal_values()
 
     def set_engine_running(self, running):
@@ -362,7 +365,9 @@ class DashboardPage(QWidget):
         if not running:
             self._fps_lbl.setText("0 fps")
             self._fps_bar.setValue(0)
-            self._cal_card.setVisible(False)
+            # Keep cal card visible if a non-vision mode is selected
+            show_cal = getattr(self, "_current_mode", "vision_only") != "vision_only"
+            self._cal_card.setVisible(show_cal)
 
     def get_fps(self):
         return len(self._frame_times)
