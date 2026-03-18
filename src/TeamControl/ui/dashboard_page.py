@@ -16,8 +16,7 @@ import time
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QGridLayout, QProgressBar, QFrame, QPushButton, QDoubleSpinBox,
-    QSpinBox, QScrollArea,
+    QGridLayout, QProgressBar, QFrame, QScrollArea,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
@@ -65,12 +64,10 @@ class DashboardPage(QWidget):
 
     coordinate_hover = Signal(float, float)
 
-    def __init__(self, field_canvas, parent=None, engine=None, test_panel=None,
-                 calibration_page=None):
+    def __init__(self, field_canvas, parent=None, engine=None, test_panel=None):
         super().__init__(parent)
         self._field = field_canvas
         self._engine = engine
-        self._calibration = calibration_page
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -105,9 +102,6 @@ class DashboardPage(QWidget):
 
         # --- Network card ---
         self._build_network_card(sb_lay)
-
-        # --- Quick calibrate card ---
-        self._build_calibrate_card(sb_lay)
 
         sb_lay.addStretch()
         scroll.setWidget(scroll_inner)
@@ -221,74 +215,6 @@ class DashboardPage(QWidget):
         lay.addLayout(fps_row)
 
         parent_lay.addWidget(card)
-
-    # ── Quick calibrate ────────────────────────────────────────────
-
-    def _build_calibrate_card(self, parent_lay):
-        card, lay = _card("Quick Calibrate")
-
-        desc = QLabel("Drive back & forth to learn speed correction.")
-        desc.setWordWrap(True)
-        desc.setStyleSheet(f"color:{TEXT_DIM}; font-size:11px;")
-        lay.addWidget(desc)
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Speed:"))
-        self._cal_speed = QDoubleSpinBox()
-        self._cal_speed.setRange(0.05, 1.0)
-        self._cal_speed.setSingleStep(0.05)
-        self._cal_speed.setValue(0.30)
-        self._cal_speed.setFixedWidth(70)
-        row.addWidget(self._cal_speed)
-        row.addWidget(QLabel("Passes:"))
-        self._cal_passes = QSpinBox()
-        self._cal_passes.setRange(1, 20)
-        self._cal_passes.setValue(4)
-        self._cal_passes.setFixedWidth(55)
-        row.addWidget(self._cal_passes)
-        row.addStretch()
-        lay.addLayout(row)
-
-        btn_row = QHBoxLayout()
-        self._cal_start_btn = QPushButton("Calibrate")
-        self._cal_start_btn.setStyleSheet(
-            f"background:{ACCENT}; color:white; padding:6px 14px; "
-            f"border-radius:4px; font-weight:bold;")
-        self._cal_start_btn.clicked.connect(self._on_quick_calibrate)
-        btn_row.addWidget(self._cal_start_btn)
-
-        self._cal_stop_btn = QPushButton("Stop")
-        self._cal_stop_btn.setStyleSheet(
-            f"background:{DANGER}; color:white; padding:6px 14px; "
-            f"border-radius:4px; font-weight:bold;")
-        self._cal_stop_btn.clicked.connect(self._on_stop_calibrate)
-        btn_row.addWidget(self._cal_stop_btn)
-        btn_row.addStretch()
-        lay.addLayout(btn_row)
-
-        self._cal_status = QLabel("Ready")
-        self._cal_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:11px;")
-        self._cal_status.setWordWrap(True)
-        lay.addWidget(self._cal_status)
-
-        parent_lay.addWidget(card)
-
-    def _on_quick_calibrate(self):
-        if self._calibration is None:
-            self._cal_status.setText("Calibration not available")
-            self._cal_status.setStyleSheet(f"color:{DANGER}; font-size:11px;")
-            return
-        self._calibration._speed_spin.setValue(self._cal_speed.value())
-        self._calibration._passes_spin.setValue(self._cal_passes.value())
-        self._calibration._start_auto()
-        self._cal_status.setText("Calibration running...")
-        self._cal_status.setStyleSheet(f"color:{SUCCESS}; font-size:11px;")
-
-    def _on_stop_calibrate(self):
-        if self._calibration is not None:
-            self._calibration._stop_test()
-        self._cal_status.setText("Stopped")
-        self._cal_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:11px;")
 
     # ── Public update API ─────────────────────────────────────────
 

@@ -52,8 +52,7 @@ class MainWindow(QMainWindow):
         self._calibration = CalibrationPage(
             engine=self._engine, test_panel=self._test_panel)
         self._dashboard = DashboardPage(
-            self._field, engine=self._engine, test_panel=self._test_panel,
-            calibration_page=self._calibration)
+            self._field, engine=self._engine, test_panel=self._test_panel)
         self._settings = SettingsPage()
         self._log_panel = LogPanel()
 

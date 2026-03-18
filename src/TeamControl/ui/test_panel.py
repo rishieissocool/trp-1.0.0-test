@@ -739,6 +739,39 @@ class TestPanel(QWidget):
             robot_id=rid, vx=vx, vy=vy, w=w,
             kick=kick, dribble=dribble, isYellow=is_yellow)
 
+    def _send_action(self, cmd: RobotCommand):
+        """Send a command for field actions — uses engine's grSim sender directly.
+
+        This bypasses the Hardware Test tab's IP/port config, which is the
+        reason right-click actions were unreliable before.
+        """
+        sent = False
+        # Primary: engine's grSim sender (always available when engine is running)
+        if self._engine:
+            try:
+                gs = getattr(self._engine, '_grsim_sender', None)
+                if gs is not None:
+                    gs.send_robot_command(cmd)
+                    sent = True
+            except Exception:
+                pass
+        # Fallback: try the Hardware Test tab's grSim if checked
+        if not sent and self._grsim_also.isChecked():
+            try:
+                gs = self._get_grsim()
+                gs.send_robot_command(cmd)
+                sent = True
+            except Exception:
+                pass
+        # Last resort: direct UDP send
+        if not sent:
+            try:
+                ip = self._ip_edit.text().strip()
+                port = self._port_spin.value()
+                self._sender.send(cmd, ip, port)
+            except Exception:
+                pass
+
     def _build_cmd(self, vx=None, vy=None, w=None, kick=None, dribble=None):
         return RobotCommand(
             robot_id=self._id_spin.value(),
@@ -885,7 +918,7 @@ class TestPanel(QWidget):
             self._action_status.setText("")
             # Send a stop command
             cmd = self._build_action_cmd()
-            self._do_send(cmd)
+            self._send_action(cmd)
 
     def _get_ball_and_robot(self):
         """Get ball and robot positions from the engine's world model."""
@@ -1002,7 +1035,7 @@ class TestPanel(QWidget):
                     and self._last_ball_dist is not None
                     and self._last_ball_dist < 200):
                 cmd = self._build_action_cmd(vx=0.3, kick=1)
-                self._do_send(cmd)
+                self._send_action(cmd)
             return
 
         # Safety — stop if near field boundary
@@ -1042,7 +1075,7 @@ class TestPanel(QWidget):
         vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
 
         cmd = self._build_action_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
-        self._do_send(cmd)
+        self._send_action(cmd)
 
     def _tick_go_to_point(self):
         if self._goto_target is None:
@@ -1068,7 +1101,7 @@ class TestPanel(QWidget):
         if dist < 80:
             # Arrived — send explicit stop
             cmd = self._build_action_cmd()
-            self._do_send(cmd)
+            self._send_action(cmd)
             self._stop_action()
             self._goto_status.setStyleSheet(
                 f"color:{SUCCESS}; font-size:12px; padding:4px;")
@@ -1085,7 +1118,7 @@ class TestPanel(QWidget):
         vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
 
         cmd = self._build_action_cmd(vx=vx, vy=vy, w=w)
-        self._do_send(cmd)
+        self._send_action(cmd)
 
     # Square waypoints — small square near center of field (500mm sides)
     _SQUARE_WAYPOINTS = [
@@ -1104,7 +1137,7 @@ class TestPanel(QWidget):
         # Safety — stop if near field boundary
         if self._is_near_boundary(robot_pose):
             cmd = self._build_action_cmd()
-            self._do_send(cmd)
+            self._send_action(cmd)
             self._stop_action()
             self._action_status.setStyleSheet(
                 f"color:{WARNING}; font-size:12px; padding:4px;")
@@ -1113,7 +1146,7 @@ class TestPanel(QWidget):
 
         if self._square_step >= len(self._SQUARE_WAYPOINTS):
             cmd = self._build_action_cmd()
-            self._do_send(cmd)
+            self._send_action(cmd)
             self._stop_action()
             self._action_status.setStyleSheet(
                 f"color:{SUCCESS}; font-size:12px; padding:4px;")
@@ -1129,7 +1162,7 @@ class TestPanel(QWidget):
         if dist < self._SQUARE_ARRIVE_DIST:
             # Stop at waypoint, then move to next
             cmd = self._build_action_cmd()
-            self._do_send(cmd)
+            self._send_action(cmd)
             self._square_step += 1
             self._action_status.setText(
                 f"Draw Square — waypoint {self._square_step}/{len(self._SQUARE_WAYPOINTS)}")
@@ -1143,7 +1176,7 @@ class TestPanel(QWidget):
         vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
 
         cmd = self._build_action_cmd(vx=vx, vy=vy, w=w)
-        self._do_send(cmd)
+        self._send_action(cmd)
 
     def _test_connection(self):
         ip = self._ip_edit.text().strip()

@@ -22,7 +22,7 @@ import time
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QPushButton, QFrame, QDoubleSpinBox, QSpinBox,
-    QPlainTextEdit, QProgressBar, QScrollArea,
+    QPlainTextEdit, QProgressBar, QScrollArea, QGridLayout,
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
@@ -261,40 +261,49 @@ class CalibrationPage(QWidget):
     def _build_values_card(self, parent_lay):
         card, lay = _card("Calibration Values")
 
-        lay.addWidget(_label("Learned from auto-calibrate:", TEXT_DIM, 11))
+        lay.addWidget(_label(
+            "Edit values manually or auto-calibrate to learn them.",
+            TEXT_DIM, 11))
+
+        grid = QGridLayout()
+        grid.setSpacing(6)
 
         # Speed scale
-        row1 = QHBoxLayout()
-        row1.addWidget(_label("Speed scale:"))
-        self._val_speed = _val_label()
-        row1.addWidget(self._val_speed)
-        row1.addStretch()
-        lay.addLayout(row1)
+        grid.addWidget(_label("Speed scale:"), 0, 0)
+        self._val_speed_spin = QDoubleSpinBox()
+        self._val_speed_spin.setRange(0.01, 5.0)
+        self._val_speed_spin.setDecimals(4)
+        self._val_speed_spin.setSingleStep(0.01)
+        self._val_speed_spin.setFixedWidth(100)
+        grid.addWidget(self._val_speed_spin, 0, 1)
+        grid.addWidget(_label("actual / commanded", TEXT_DIM, 10), 0, 2)
 
         # Lateral drift
-        row2 = QHBoxLayout()
-        row2.addWidget(_label("Lateral drift/m:"))
-        self._val_drift = _val_label()
-        row2.addWidget(self._val_drift)
-        row2.addStretch()
-        lay.addLayout(row2)
+        grid.addWidget(_label("Lateral drift/m:"), 1, 0)
+        self._val_drift_spin = QDoubleSpinBox()
+        self._val_drift_spin.setRange(-50.0, 50.0)
+        self._val_drift_spin.setDecimals(2)
+        self._val_drift_spin.setSingleStep(0.5)
+        self._val_drift_spin.setSuffix(" mm/m")
+        self._val_drift_spin.setFixedWidth(120)
+        grid.addWidget(self._val_drift_spin, 1, 1)
 
         # Stop overshoot
-        row3 = QHBoxLayout()
-        row3.addWidget(_label("Stop overshoot:"))
-        self._val_stop = _val_label()
-        row3.addWidget(self._val_stop)
-        row3.addStretch()
-        lay.addLayout(row3)
+        grid.addWidget(_label("Stop overshoot:"), 2, 0)
+        self._val_stop_spin = QDoubleSpinBox()
+        self._val_stop_spin.setRange(-200.0, 200.0)
+        self._val_stop_spin.setDecimals(1)
+        self._val_stop_spin.setSingleStep(5.0)
+        self._val_stop_spin.setSuffix(" mm")
+        self._val_stop_spin.setFixedWidth(120)
+        grid.addWidget(self._val_stop_spin, 2, 1)
 
-        # Runs count
-        row4 = QHBoxLayout()
-        row4.addWidget(_label("Total runs:"))
+        # Runs count (read-only info)
+        grid.addWidget(_label("Total runs:"), 3, 0)
         self._val_runs = _val_label()
-        row4.addWidget(self._val_runs)
-        row4.addStretch()
-        lay.addLayout(row4)
+        grid.addWidget(self._val_runs, 3, 1)
 
+        lay.addLayout(grid)
         self._refresh_values()
 
         # Buttons
@@ -385,12 +394,19 @@ class CalibrationPage(QWidget):
         cmd = RobotCommand(
             robot_id=rid, vx=vx, vy=vy, w=w,
             kick=kick, dribble=dribble, isYellow=is_yellow)
-        if self._test_panel:
-            self._test_panel._do_send(cmd)
-        else:
+        # Send via engine's grSim sender directly
+        sent = False
+        if self._engine:
             try:
-                if self._engine and self._engine._grsim_sender:
-                    self._engine._grsim_sender.send_robot_command(cmd)
+                gs = getattr(self._engine, '_grsim_sender', None)
+                if gs is not None:
+                    gs.send_robot_command(cmd)
+                    sent = True
+            except Exception:
+                pass
+        if not sent and self._test_panel:
+            try:
+                self._test_panel._do_send(cmd)
             except Exception:
                 pass
 
@@ -429,11 +445,11 @@ class CalibrationPage(QWidget):
             self._set_status(f"Save failed: {e}", DANGER)
 
     def _refresh_values(self):
-        """Update the displayed calibration values."""
+        """Update the displayed calibration values from internal state."""
         c = self._cal
-        self._val_speed.setText(f"{c['speed_scale']:.4f}")
-        self._val_drift.setText(f"{c['lateral_drift_per_m']:.2f} mm/m")
-        self._val_stop.setText(f"{c['stop_overshoot_mm']:.1f} mm")
+        self._val_speed_spin.setValue(c['speed_scale'])
+        self._val_drift_spin.setValue(c['lateral_drift_per_m'])
+        self._val_stop_spin.setValue(c['stop_overshoot_mm'])
         n = len(c.get("runs", []))
         self._val_runs.setText(str(n))
 
@@ -729,9 +745,13 @@ class CalibrationPage(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     def _apply_cal(self):
-        """Save current calibration values to disk."""
+        """Read values from spinboxes, save to disk, and reload."""
+        # Read manual edits from spinboxes
+        self._cal['speed_scale'] = round(self._val_speed_spin.value(), 4)
+        self._cal['lateral_drift_per_m'] = round(self._val_drift_spin.value(), 2)
+        self._cal['stop_overshoot_mm'] = round(self._val_stop_spin.value(), 1)
+
         self._save_cal()
-        self._refresh_values()
 
         # Reload into ball_nav if possible
         try:
