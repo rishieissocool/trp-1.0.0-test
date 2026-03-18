@@ -520,7 +520,7 @@ class TestPanel(QWidget):
             kick=kick, dribble=dribble, isYellow=is_yellow)
 
     def _send_action(self, cmd: RobotCommand):
-        """Send a command for field actions — same path as Hardware Test."""
+        """Send a command for field actions via raw UDP to the robot."""
         self._do_send(cmd)
 
     def _build_cmd(self, vx=None, vy=None, w=None, kick=None, dribble=None):
