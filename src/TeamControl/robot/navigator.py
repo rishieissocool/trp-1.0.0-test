@@ -7,7 +7,8 @@ IS the target.
 
 Key features:
 - Smooth, moderate speed (not too fast, not too slow)
-- Tangential + repulsive obstacle avoidance for curved paths
+- Tangential + repulsive obstacle avoidance with cosine falloff
+- Exponential smoothing so velocity never jumps between ticks
 - Deceleration ramp near the ball so the robot doesn't overshoot
 - Faces the ball at all times
 """
@@ -27,9 +28,17 @@ from TeamControl.robot.constants import (
 )
 
 # ── Obstacle avoidance tuning ────────────────────────────────────
-AVOID_DIST = 400          # start avoiding at this range (mm)
-AVOID_STRENGTH = 3.0      # base repulsive strength
-AVOID_CRITICAL = 180      # very close → emergency avoidance
+AVOID_DIST = 550          # start avoiding at this range (mm)
+AVOID_STRENGTH = 2.5      # peak avoidance magnitude
+AVOID_CRITICAL = 260      # very close → max strength
+
+# Smoothing: 0 = no smoothing (instant), 1 = never changes.
+# 0.55 gives a nice gentle blend across frames at 60 Hz.
+SMOOTH_ALPHA = 0.55
+
+# Tangential vs repulsive balance.
+# Higher = more curving around, less pushing away = smoother paths.
+TANGENT_RATIO = 1.2
 
 # ── Ball-chase speed ─────────────────────────────────────────────
 CHASE_SPEED = CRUISE_SPEED * 0.85   # smooth, moderate pace
@@ -51,18 +60,29 @@ WAYPOINTS_B = [
 ]
 
 
+def _smooth_strength(d_obs):
+    """Cosine-based falloff — strength goes from 0 at AVOID_DIST to
+    AVOID_STRENGTH at AVOID_CRITICAL, with a gentle S-curve in between.
+    Below AVOID_CRITICAL it stays at AVOID_STRENGTH (capped)."""
+    if d_obs >= AVOID_DIST:
+        return 0.0
+    if d_obs <= AVOID_CRITICAL:
+        return AVOID_STRENGTH
+    t = (AVOID_DIST - d_obs) / (AVOID_DIST - AVOID_CRITICAL)
+    return AVOID_STRENGTH * 0.5 * (1.0 - math.cos(math.pi * t))
+
+
 def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
                        prev_obs_pos=None):
     """
     Compute tangential + repulsive avoidance force from all other robots.
-    Uses predictive avoidance: avoids where robots WILL be in ~0.3s, not
-    just where they are now.
+    Uses predictive avoidance and smooth cosine falloff.
     Returns (avoid_vx, avoid_vy, closest_obstacle_distance, updated_obs_pos).
     """
     avoid_vx, avoid_vy = 0.0, 0.0
     closest_obs = 9999.0
     current_obs_pos = {}
-    PREDICT_T = 0.5  # seconds to predict ahead
+    PREDICT_T = 0.4
 
     for color in (True, False):
         for oid in range(16):
@@ -85,8 +105,8 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
                     pred_x = ox + est_vx * PREDICT_T
                     pred_y = oy + est_vy * PREDICT_T
 
-                avoid_x = ox * 0.3 + pred_x * 0.7
-                avoid_y = oy * 0.3 + pred_y * 0.7
+                avoid_x = ox * 0.35 + pred_x * 0.65
+                avoid_y = oy * 0.35 + pred_y * 0.65
 
                 rel_obs = world2robot(rpos, (avoid_x, avoid_y))
                 d_obs = math.hypot(rel_obs[0], rel_obs[1])
@@ -94,26 +114,23 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
                 if d_obs < closest_obs:
                     closest_obs = d_obs
 
-                if d_obs < AVOID_DIST and d_obs > 1:
-                    if d_obs < AVOID_CRITICAL:
-                        strength = AVOID_STRENGTH * 3.0
-                    elif d_obs < AVOID_DIST * 0.5:
-                        ratio = (AVOID_DIST - d_obs) / AVOID_DIST
-                        strength = ratio * AVOID_STRENGTH * 1.8
-                    else:
-                        ratio = (AVOID_DIST - d_obs) / AVOID_DIST
-                        strength = ratio * ratio * AVOID_STRENGTH
+                strength = _smooth_strength(d_obs)
+                if strength > 0.001 and d_obs > 1:
+                    inv_d = 1.0 / d_obs
 
-                    rep_x = -(rel_obs[0] / d_obs) * strength
-                    rep_y = -(rel_obs[1] / d_obs) * strength
+                    # Repulsive: push directly away from obstacle
+                    rep_x = -rel_obs[0] * inv_d * strength
+                    rep_y = -rel_obs[1] * inv_d * strength
 
-                    tang_x =  rel_obs[1] / d_obs
-                    tang_y = -rel_obs[0] / d_obs
+                    # Tangential: curve around (perpendicular to obstacle direction)
+                    tang_x =  rel_obs[1] * inv_d
+                    tang_y = -rel_obs[0] * inv_d
+                    # Pick the tangential direction that moves toward target
                     if tang_x * rel_target[0] + tang_y * rel_target[1] < 0:
                         tang_x, tang_y = -tang_x, -tang_y
 
-                    avoid_vx += rep_x + tang_x * strength * 0.8
-                    avoid_vy += rep_y + tang_y * strength * 0.8
+                    avoid_vx += rep_x + tang_x * strength * TANGENT_RATIO
+                    avoid_vy += rep_y + tang_y * strength * TANGENT_RATIO
             except Exception:
                 continue
 
@@ -131,11 +148,11 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
     The `waypoints` argument is accepted for API compatibility but ignored.
     """
     frame = None
-    prev_obs_pos = {}  # for predictive avoidance
+    prev_obs_pos = {}
+    # Exponential-smoothed output velocities
+    sm_vx, sm_vy, sm_w = 0.0, 0.0, 0.0
 
     while is_running.is_set():
-        now = time.time()
-
         # ── Fetch frame (every tick for fast obstacle reaction) ─
         try:
             f = wm.get_latest_frame()
@@ -173,10 +190,14 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
             rpos, frame, is_yellow, robot_id, rel_ball, prev_obs_pos)
 
         # ── Base navigation toward ball ──────────────────────
-        if closest_obs < AVOID_CRITICAL:
-            base_speed = CHASE_SPEED * 0.55
-        elif closest_obs < AVOID_DIST * 0.65:
-            base_speed = CHASE_SPEED * 0.75
+        # Smoothly reduce speed near obstacles using cosine interpolation
+        if closest_obs < AVOID_DIST:
+            if closest_obs <= AVOID_CRITICAL:
+                speed_frac = 0.5
+            else:
+                t = (AVOID_DIST - closest_obs) / (AVOID_DIST - AVOID_CRITICAL)
+                speed_frac = 1.0 - 0.5 * 0.5 * (1.0 - math.cos(math.pi * t))
+            base_speed = CHASE_SPEED * speed_frac
         else:
             base_speed = CHASE_SPEED
 
@@ -186,30 +207,38 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
                                      min_speed=0.06)
 
         # ── Blend navigation + avoidance ─────────────────────
-        vx = nav_vx + avoid_vx
-        vy = nav_vy + avoid_vy
+        raw_vx = nav_vx + avoid_vx
+        raw_vy = nav_vy + avoid_vy
 
-        # Cap speed — allow higher when actively dodging
-        speed = math.hypot(vx, vy)
-        max_spd = CHASE_SPEED * 1.4 if closest_obs < AVOID_DIST else CHASE_SPEED * 1.15
+        # Cap speed — allow a bit more when actively dodging
+        speed = math.hypot(raw_vx, raw_vy)
+        max_spd = CHASE_SPEED * 1.3 if closest_obs < AVOID_DIST else CHASE_SPEED * 1.1
         if speed > max_spd:
-            vx = vx / speed * max_spd
-            vy = vy / speed * max_spd
+            raw_vx = raw_vx / speed * max_spd
+            raw_vy = raw_vy / speed * max_spd
 
         # ── Wall braking ────────────────────────────────────
-        vx, vy = wall_brake(rpos[0], rpos[1], vx, vy)
+        raw_vx, raw_vy = wall_brake(rpos[0], rpos[1], raw_vx, raw_vy)
 
         # ── Face the ball ────────────────────────────────────
         ang_ball = math.atan2(rel_ball[1], rel_ball[0])
         if abs(ang_ball) < 0.05:
-            w = 0.0
+            raw_w = 0.0
         else:
-            w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+            raw_w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+
+        # ── Exponential smoothing ─────────────────────────────
+        # Blends previous output with new target so the robot
+        # never jerks — gives a gentle, curved motion.
+        a = SMOOTH_ALPHA
+        sm_vx = a * sm_vx + (1.0 - a) * raw_vx
+        sm_vy = a * sm_vy + (1.0 - a) * raw_vy
+        sm_w  = a * sm_w  + (1.0 - a) * raw_w
 
         # ── Rotation compensation ───────────────────────────
-        vx, vy = rotation_compensate(vx, vy, w)
+        out_vx, out_vy = rotation_compensate(sm_vx, sm_vy, sm_w)
 
-        cmd = RobotCommand(robot_id=robot_id, vx=vx, vy=vy, w=w,
+        cmd = RobotCommand(robot_id=robot_id, vx=out_vx, vy=out_vy, w=sm_w,
                            kick=0, dribble=0, isYellow=is_yellow)
         dispatch_q.put((cmd, 0.15))
         time.sleep(LOOP_RATE)
