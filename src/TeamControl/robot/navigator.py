@@ -17,6 +17,9 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
+from TeamControl.robot.ball_nav import (
+    clamp, move_toward, wall_brake, rotation_compensate,
+)
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     CRUISE_SPEED, SPRINT_SPEED, MAX_W, TURN_GAIN,
@@ -30,7 +33,7 @@ AVOID_CRITICAL = 350      # very close → emergency avoidance
 
 # ── Ball-chase speed ─────────────────────────────────────────────
 CHASE_SPEED = CRUISE_SPEED * 0.85   # smooth, moderate pace
-NEAR_BALL_DIST = 200                # start slowing down here
+NEAR_BALL_DIST = 300                # start slowing down here
 STOP_DIST = 80                      # stop this close to ball
 
 # Keep old exports so main.py import doesn't break
@@ -46,21 +49,6 @@ WAYPOINTS_B = [
     (HALF_LEN - 500, HALF_WID - 200),
     (HALF_LEN - 500, -HALF_WID + 200),
 ]
-
-
-def _clamp(v, lo, hi):
-    return max(lo, min(hi, v))
-
-
-def _move(rel, speed, ramp_dist=350.0, stop_dist=25.0, min_speed=0.08):
-    """Move toward a robot-local point with smooth deceleration."""
-    d = math.hypot(rel[0], rel[1])
-    if d < stop_dist:
-        return 0.0, 0.0
-    if d < ramp_dist:
-        t = (d - stop_dist) / max(ramp_dist - stop_dist, 1.0)
-        speed = max(speed * t, min_speed)
-    return (rel[0] / d) * speed, (rel[1] / d) * speed
 
 
 def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
@@ -93,7 +81,6 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
                 pred_x, pred_y = ox, oy
                 if prev_obs_pos and obs_key in prev_obs_pos:
                     px, py = prev_obs_pos[obs_key]
-                    # Estimate velocity from position change
                     est_vx = (ox - px) / max(FRAME_INTERVAL, 0.01)
                     est_vy = (oy - py) / max(FRAME_INTERVAL, 0.01)
                     pred_x = ox + est_vx * PREDICT_T
@@ -110,7 +97,6 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
                     closest_obs = d_obs
 
                 if d_obs < AVOID_DIST and d_obs > 1:
-                    # Strength: ramps up sharply when close
                     if d_obs < AVOID_CRITICAL:
                         strength = AVOID_STRENGTH * 2.5
                     else:
@@ -121,8 +107,7 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
                     rep_x = -(rel_obs[0] / d_obs) * strength
                     rep_y = -(rel_obs[1] / d_obs) * strength
 
-                    # Tangential: curve around (perpendicular to repulsive,
-                    # in whichever direction moves us toward the target)
+                    # Tangential: curve around
                     tang_x =  rel_obs[1] / d_obs
                     tang_y = -rel_obs[0] / d_obs
                     if tang_x * rel_target[0] + tang_y * rel_target[1] < 0:
@@ -192,16 +177,15 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
             rpos, frame, is_yellow, robot_id, rel_ball, prev_obs_pos)
 
         # ── Base navigation toward ball ──────────────────────
-        # Smooth, moderate speed with gentle deceleration near the ball
         if closest_obs < AVOID_CRITICAL:
             base_speed = CHASE_SPEED * 0.7
         else:
             base_speed = CHASE_SPEED
 
-        nav_vx, nav_vy = _move(rel_ball, base_speed,
-                               ramp_dist=NEAR_BALL_DIST,
-                               stop_dist=STOP_DIST,
-                               min_speed=0.06)
+        nav_vx, nav_vy = move_toward(rel_ball, base_speed,
+                                     ramp_dist=NEAR_BALL_DIST,
+                                     stop_dist=STOP_DIST,
+                                     min_speed=0.06)
 
         # ── Blend navigation + avoidance ─────────────────────
         vx = nav_vx + avoid_vx
@@ -214,22 +198,18 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
             vx = vx / speed * max_spd
             vy = vy / speed * max_spd
 
+        # ── Wall braking ────────────────────────────────────
+        vx, vy = wall_brake(rpos[0], rpos[1], vx, vy)
+
         # ── Face the ball ────────────────────────────────────
         ang_ball = math.atan2(rel_ball[1], rel_ball[0])
         if abs(ang_ball) < 0.05:
             w = 0.0
         else:
-            w = _clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+            w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
 
         # ── Rotation compensation ───────────────────────────
-        # The robot will rotate by w*dt during this tick.
-        # Pre-rotate the velocity so the world-frame path stays
-        # on target despite the simultaneous rotation.
-        if abs(w) > 0.01:
-            half_rot = -w * LOOP_RATE * 0.5
-            cos_r = math.cos(half_rot)
-            sin_r = math.sin(half_rot)
-            vx, vy = vx * cos_r - vy * sin_r, vx * sin_r + vy * cos_r
+        vx, vy = rotation_compensate(vx, vy, w)
 
         cmd = RobotCommand(robot_id=robot_id, vx=vx, vy=vy, w=w,
                            kick=0, dribble=0, isYellow=is_yellow)

@@ -42,6 +42,7 @@ from TeamControl.robot.constants import (
     HALF_LEN, HALF_WID, FIELD_MARGIN,
 )
 from TeamControl.world.transform_cords import world2robot
+from TeamControl.robot.ball_nav import clamp, move_toward, wall_brake
 
 # Safe boundary — stop if the robot gets this close to the field edge
 _SAFE_X = HALF_LEN - FIELD_MARGIN   # 2200 mm from center
@@ -996,30 +997,26 @@ class TestPanel(QWidget):
 
         kick = 0
         dribble = 0
-        vx = 0.0
-        vy = 0.0
-        w = 0.0
 
-        arrive_dist = 70  # mm — close enough to touch/kick
-        kick_dist = 150   # mm — close enough to fire kick (ball still visible)
+        kick_dist = 150   # mm — close enough to fire kick
 
         if self._action_mode == "go_to_ball_kick" and dist < kick_dist:
             # Close enough to kick — align and fire
+            dribble = 1
+            vx, vy = move_toward(rel_ball, 0.15, ramp_dist=120, stop_dist=10)
+            w = clamp(angle * 0.5, -MAX_W, MAX_W)
             if abs(angle) < 0.2:
                 vx = 0.3
+                vy = 0.0
                 kick = 1
-            else:
-                w = max(-0.3, min(0.3, angle * 0.5))
-        elif dist < arrive_dist:
-            # go_to_ball — just stop, we're there
-            pass
-        elif abs(angle) > 0.2:
-            # Turn to face ball first
-            w = max(-0.4, min(0.4, angle * 0.5))
+                dribble = 0
         else:
-            # Facing the ball — drive forward with decel ramp
-            speed = min(0.5, max(0.05, (dist - arrive_dist) / 1000.0))
-            vx = speed
+            # Move toward ball omnidirectionally
+            vx, vy = move_toward(rel_ball, 0.4, ramp_dist=400, stop_dist=70)
+            w = clamp(angle * 0.5, -MAX_W, MAX_W)
+
+        # Slow near walls instead of hard stop
+        vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
 
         cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
         self._do_send(cmd)
@@ -1045,7 +1042,7 @@ class TestPanel(QWidget):
         dist = math.hypot(rel[0], rel[1])
         angle = math.atan2(rel[1], rel[0])
 
-        if dist < 150:
+        if dist < 80:
             # Arrived — send explicit stop
             cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
             self._do_send(cmd)
@@ -1056,21 +1053,15 @@ class TestPanel(QWidget):
             return
 
         max_speed = self._goto_vel_spin.value()
-        vx = 0.0
-        w = 0.0
 
-        if abs(angle) > 0.2:
-            # Turn to face target first
-            w = max(-0.4, min(0.4, angle * 0.5))
-        else:
-            # Drive forward with decel ramp
-            ramp_dist = max(0.0, dist - 150)
-            speed = min(max_speed, ramp_dist / 1000.0)
-            if speed < 0.05:
-                speed = 0.05
-            vx = speed
+        # Omnidirectional movement toward target
+        vx, vy = move_toward(rel, max_speed, ramp_dist=400, stop_dist=80)
+        w = clamp(angle * 0.5, -MAX_W, MAX_W)
 
-        cmd = self._build_cmd(vx=vx, vy=0, w=w, kick=0, dribble=0)
+        # Slow near walls
+        vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
+
+        cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=0, dribble=0)
         self._do_send(cmd)
 
     # Square waypoints — small square near center of field (500mm sides)
@@ -1121,21 +1112,14 @@ class TestPanel(QWidget):
                 f"Draw Square — waypoint {self._square_step}/{len(self._SQUARE_WAYPOINTS)}")
             return
 
-        vx = 0.0
-        w = 0.0
+        # Omnidirectional movement toward waypoint
+        vx, vy = move_toward(rel, 0.4, ramp_dist=400, stop_dist=80)
+        w = clamp(angle * 0.5, -MAX_W, MAX_W)
 
-        if abs(angle) > 0.2:
-            # Turn to face waypoint first
-            w = max(-0.4, min(0.4, angle * 0.5))
-        else:
-            # Drive toward waypoint with decel ramp
-            ramp_dist = max(0.0, dist - 150)
-            speed = min(0.5, ramp_dist / 1000.0)
-            if speed < 0.05:
-                speed = 0.05
-            vx = speed
+        # Slow near walls
+        vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
 
-        cmd = self._build_cmd(vx=vx, vy=0, w=w, kick=0, dribble=0)
+        cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=0, dribble=0)
         self._do_send(cmd)
 
     def _test_connection(self):

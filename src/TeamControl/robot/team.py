@@ -23,7 +23,7 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.path_planner import compute_arc_nav
+from TeamControl.robot.ball_nav import compute_arc_nav, predict_ball as _predict_ball
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -224,21 +224,6 @@ def _safe_pos_def(x, y, our_gx, opp_gx):
 # ════════════════════════════════════════════════════════════════════
 #  BALL PHYSICS
 # ════════════════════════════════════════════════════════════════════
-
-def _predict_ball(ball, bvel, dt):
-    bx, by = ball
-    vx, vy = bvel
-    t = 0.0
-    step = 0.02
-    while t < dt:
-        s = min(step, dt - t)
-        bx += vx * s
-        by += vy * s
-        f = max(1.0 - FRICTION * s, 0.0)
-        vx *= f
-        vy *= f
-        t += s
-    return (_cl(bx, -HALF_LEN, HALF_LEN), _cl(by, -HALF_WID, HALF_WID))
 
 
 def _optimal_intercept(rpos, ball, bvel):
@@ -674,6 +659,10 @@ def _defender_targets(ball, our, opps, our_gx, opp_gx, dids, we_have, poss_state
 #  COMMAND BUILDER
 # ════════════════════════════════════════════════════════════════════
 
+_WALL_BRAKE_DIST = 400   # mm from field edge to start braking
+_WALL_BRAKE_MIN  = 0.10  # minimum speed factor near walls
+
+
 def _cmd(rid, rpos, target, face, speed, kick, dribble, yellow,
          ramp_dist=350.0, stop_dist=20.0):
     rel_t = world2robot(rpos, target)
@@ -690,6 +679,16 @@ def _cmd(rid, rpos, target, face, speed, kick, dribble, yellow,
             s = max(speed * t, 0.10)
         ux, uy = rel_t[0] / d, rel_t[1] / d
         vx, vy = ux * s, uy * s
+
+    # Wall braking — slow down near field edges
+    dist_to_wall = min(
+        HALF_LEN - abs(rpos[0]),
+        HALF_WID - abs(rpos[1]),
+    )
+    if dist_to_wall < _WALL_BRAKE_DIST:
+        wf = max(dist_to_wall / _WALL_BRAKE_DIST, _WALL_BRAKE_MIN)
+        vx *= wf
+        vy *= wf
 
     ang = math.atan2(rel_f[1], rel_f[0])
     w = 0.0 if abs(ang) < 0.04 else _cl(ang * TURN_GAIN, -MAX_W, MAX_W)
@@ -763,28 +762,28 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
 
         if action == 'shoot':
             if ang < 0.36 and cd_ok:
-                return _cmd(rid, rpos, ball, aim, SPD_APPROACH, 1, 0, yellow), None
+                return _cmd(rid, rpos, ball, aim, SPD_DRIBBLE, 1, 0, yellow), None
             return _cmd(rid, rpos, aim, aim, SPD_POSSESS, 0, 1, yellow), None
 
         if action == 'pass' and pass_tgt:
             still_safe = _pass_safe(ball, pass_tgt, opps)
             if ang < 0.48 and cd_ok and still_safe:
-                return _cmd(rid, rpos, ball, pass_tgt, SPD_APPROACH, 1, 0, yellow), None
+                return _cmd(rid, rpos, ball, pass_tgt, SPD_DRIBBLE, 1, 0, yellow), None
             if still_safe:
                 return _cmd(rid, rpos, pass_tgt, pass_tgt, SPD_POSSESS, 0, 1, yellow), None
             if shoot_sc >= SHOOT_THRESH:
                 ra2 = world2robot(rpos, shot_tgt)
                 if abs(math.atan2(ra2[1], ra2[0])) < 0.36 and cd_ok:
-                    return _cmd(rid, rpos, ball, shot_tgt, SPD_APPROACH, 1, 0, yellow), None
+                    return _cmd(rid, rpos, ball, shot_tgt, SPD_DRIBBLE, 1, 0, yellow), None
                 return _cmd(rid, rpos, shot_tgt, shot_tgt, SPD_POSSESS, 0, 1, yellow), None
 
         if pressed and cd_ok:
             if pass_tgt and _pass_safe(ball, pass_tgt, opps):
                 ra2 = world2robot(rpos, pass_tgt)
                 if abs(math.atan2(ra2[1], ra2[0])) < 0.55:
-                    return _cmd(rid, rpos, ball, pass_tgt, SPD_APPROACH, 1, 0, yellow), None
+                    return _cmd(rid, rpos, ball, pass_tgt, SPD_DRIBBLE, 1, 0, yellow), None
             elif ang < 0.7:
-                return _cmd(rid, rpos, ball, aim, SPD_APPROACH, 1, 0, yellow), None
+                return _cmd(rid, rpos, ball, aim, SPD_DRIBBLE, 1, 0, yellow), None
 
         return _cmd(rid, rpos, aim, aim, SPD_DRIBBLE, 0, 1, yellow), None
 
@@ -808,19 +807,21 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
     d_nav = _dist((rpos[0], rpos[1]), nav)
 
     if is_behind and d_nav < 200 and d_ball < BALL_NEAR:
-        # Lined up behind ball — charge through
-        return _cmd(rid, rpos, ball, ball, SPD_APPROACH, 0, 1, yellow,
-                    ramp_dist=200), committed_side
+        # Lined up behind ball — approach gently so kicker contacts, not body
+        return _cmd(rid, rpos, ball, ball, SPD_DRIBBLE, 0, 1, yellow,
+                    ramp_dist=350), committed_side
 
-    # Speed selection
+    # Speed selection — smooth transitions, slower near ball
     if poss_state == 'COUNTER':
-        speed = SPD_COUNTER if d_ball > 800 else SPD_SPRINT
+        speed = SPD_COUNTER if d_ball > 800 else SPD_CRUISE
     elif d_ball > 1600:
         speed = SPD_SPRINT
-    elif d_ball > 500:
-        speed = SPD_CRUISE
+    elif d_ball > BALL_NEAR:
+        # Smooth interpolation from SPRINT to DRIBBLE
+        t = (d_ball - BALL_NEAR) / (1600.0 - BALL_NEAR)
+        speed = SPD_DRIBBLE + (SPD_SPRINT - SPD_DRIBBLE) * t
     else:
-        speed = SPD_APPROACH
+        speed = SPD_DRIBBLE
     drib = 1 if d_ball < BALL_NEAR else 0
 
     return _cmd(rid, rpos, nav, ball, speed, 0, drib, yellow,
