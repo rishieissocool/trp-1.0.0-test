@@ -27,9 +27,9 @@ from TeamControl.robot.constants import (
 )
 
 # ── Obstacle avoidance tuning ────────────────────────────────────
-AVOID_DIST = 1000         # start avoiding at this range (mm)
+AVOID_DIST = 400          # start avoiding at this range (mm)
 AVOID_STRENGTH = 3.0      # base repulsive strength
-AVOID_CRITICAL = 450      # very close → emergency avoidance
+AVOID_CRITICAL = 180      # very close → emergency avoidance
 
 # ── Ball-chase speed ─────────────────────────────────────────────
 CHASE_SPEED = CRUISE_SPEED * 0.85   # smooth, moderate pace
@@ -175,7 +175,7 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
         # ── Base navigation toward ball ──────────────────────
         if closest_obs < AVOID_CRITICAL:
             base_speed = CHASE_SPEED * 0.55
-        elif closest_obs < AVOID_DIST * 0.6:
+        elif closest_obs < AVOID_DIST * 0.65:
             base_speed = CHASE_SPEED * 0.75
         else:
             base_speed = CHASE_SPEED
