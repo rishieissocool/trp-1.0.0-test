@@ -10,21 +10,28 @@ Layout:
   └────────────────────────────────────┴──────────────────┘
 """
 
+import json
 import math
+import os
 import time
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QGridLayout, QProgressBar, QFrame, QScrollArea,
+    QDoubleSpinBox, QPushButton,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
 
 from TeamControl.ui.theme import (
     ACCENT, TEXT_DIM, SUCCESS, WARNING, DANGER,
-    YELLOW_TEAM, BLUE_TEAM,
+    YELLOW_TEAM, BLUE_TEAM, BORDER, BG_CARD,
 )
+
+_CAL_PATH = os.path.normpath(os.path.join(
+    os.path.dirname(__file__), os.pardir, os.pardir, os.pardir,
+    "calibration.json"))
 
 
 def _card(title_text):
@@ -102,6 +109,9 @@ class DashboardPage(QWidget):
 
         # --- Network card ---
         self._build_network_card(sb_lay)
+
+        # --- Calibration card (hidden until a non-vision mode starts) ---
+        self._build_cal_card(sb_lay)
 
         sb_lay.addStretch()
         scroll.setWidget(scroll_inner)
@@ -216,6 +226,111 @@ class DashboardPage(QWidget):
 
         parent_lay.addWidget(card)
 
+    # ── Calibration card ─────────────────────────────────────────
+
+    def _build_cal_card(self, parent_lay):
+        self._cal_card, lay = _card("Calibration")
+        self._cal_card.setVisible(False)
+
+        grid = QGridLayout()
+        grid.setSpacing(6)
+
+        grid.addWidget(QLabel("Speed scale:"), 0, 0)
+        self._cal_speed = QDoubleSpinBox()
+        self._cal_speed.setRange(0.01, 5.0)
+        self._cal_speed.setDecimals(4)
+        self._cal_speed.setSingleStep(0.01)
+        self._cal_speed.setFixedWidth(100)
+        grid.addWidget(self._cal_speed, 0, 1)
+        grid.addWidget(QLabel("actual / cmd"), 0, 2)
+
+        grid.addWidget(QLabel("Lateral drift/m:"), 1, 0)
+        self._cal_drift = QDoubleSpinBox()
+        self._cal_drift.setRange(-50.0, 50.0)
+        self._cal_drift.setDecimals(2)
+        self._cal_drift.setSingleStep(0.5)
+        self._cal_drift.setSuffix(" mm/m")
+        self._cal_drift.setFixedWidth(120)
+        grid.addWidget(self._cal_drift, 1, 1)
+
+        grid.addWidget(QLabel("Stop overshoot:"), 2, 0)
+        self._cal_stop = QDoubleSpinBox()
+        self._cal_stop.setRange(-200.0, 200.0)
+        self._cal_stop.setDecimals(1)
+        self._cal_stop.setSingleStep(5.0)
+        self._cal_stop.setSuffix(" mm")
+        self._cal_stop.setFixedWidth(120)
+        grid.addWidget(self._cal_stop, 2, 1)
+
+        lay.addLayout(grid)
+
+        btn_row = QHBoxLayout()
+        apply_btn = QPushButton("Apply && Save")
+        apply_btn.setStyleSheet(
+            f"background:{SUCCESS}; color:white; padding:5px 12px; "
+            f"border-radius:4px; font-weight:bold;")
+        apply_btn.clicked.connect(self._apply_cal)
+        btn_row.addWidget(apply_btn)
+
+        reset_btn = QPushButton("Reset")
+        reset_btn.setStyleSheet(
+            f"background:{BG_CARD}; color:{WARNING}; padding:5px 12px; "
+            f"border:1px solid {BORDER}; border-radius:4px;")
+        reset_btn.clicked.connect(self._reset_cal)
+        btn_row.addWidget(reset_btn)
+        lay.addLayout(btn_row)
+
+        self._cal_status = QLabel("")
+        self._cal_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:11px;")
+        lay.addWidget(self._cal_status)
+
+        parent_lay.addWidget(self._cal_card)
+        self._load_cal_values()
+
+    def _load_cal_values(self):
+        try:
+            with open(_CAL_PATH, "r") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            data = {}
+        self._cal_speed.setValue(float(data.get("speed_scale", 1.0)))
+        self._cal_drift.setValue(float(data.get("lateral_drift_per_m", 0.0)))
+        self._cal_stop.setValue(float(data.get("stop_overshoot_mm", 0.0)))
+
+    def _apply_cal(self):
+        try:
+            with open(_CAL_PATH, "r") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            data = {}
+        data["speed_scale"] = round(self._cal_speed.value(), 4)
+        data["lateral_drift_per_m"] = round(self._cal_drift.value(), 2)
+        data["stop_overshoot_mm"] = round(self._cal_stop.value(), 1)
+        try:
+            with open(_CAL_PATH, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            self._cal_status.setStyleSheet(f"color:{DANGER}; font-size:11px;")
+            self._cal_status.setText(f"Save failed: {e}")
+            return
+        try:
+            from TeamControl.robot import ball_nav
+            ball_nav._reload_calibration()
+        except Exception:
+            pass
+        self._cal_status.setStyleSheet(f"color:{SUCCESS}; font-size:11px;")
+        self._cal_status.setText(
+            f"Saved — scale={data['speed_scale']:.4f}  "
+            f"drift={data['lateral_drift_per_m']:.2f}")
+
+    def _reset_cal(self):
+        self._cal_speed.setValue(1.0)
+        self._cal_drift.setValue(0.0)
+        self._cal_stop.setValue(0.0)
+        self._apply_cal()
+        self._cal_status.setStyleSheet(f"color:{WARNING}; font-size:11px;")
+        self._cal_status.setText("Reset to defaults")
+
     # ── Public update API ─────────────────────────────────────────
 
     def update_frame(self, snap):
@@ -236,6 +351,9 @@ class DashboardPage(QWidget):
 
     def set_mode(self, mode):
         self._gs_mode.setText(mode.upper())
+        self._cal_card.setVisible(mode != "vision_only")
+        if mode != "vision_only":
+            self._load_cal_values()
 
     def set_engine_running(self, running):
         self._vis_dot.set_ok(running)
@@ -244,6 +362,7 @@ class DashboardPage(QWidget):
         if not running:
             self._fps_lbl.setText("0 fps")
             self._fps_bar.setValue(0)
+            self._cal_card.setVisible(False)
 
     def get_fps(self):
         return len(self._frame_times)

@@ -27,9 +27,9 @@ from TeamControl.robot.constants import (
 )
 
 # ── Obstacle avoidance tuning ────────────────────────────────────
-AVOID_DIST = 700          # start avoiding at this range (mm)
-AVOID_STRENGTH = 1.8      # base repulsive strength
-AVOID_CRITICAL = 350      # very close → emergency avoidance
+AVOID_DIST = 1000         # start avoiding at this range (mm)
+AVOID_STRENGTH = 3.0      # base repulsive strength
+AVOID_CRITICAL = 450      # very close → emergency avoidance
 
 # ── Ball-chase speed ─────────────────────────────────────────────
 CHASE_SPEED = CRUISE_SPEED * 0.85   # smooth, moderate pace
@@ -62,10 +62,10 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
     avoid_vx, avoid_vy = 0.0, 0.0
     closest_obs = 9999.0
     current_obs_pos = {}
-    PREDICT_T = 0.3  # seconds to predict ahead
+    PREDICT_T = 0.5  # seconds to predict ahead
 
     for color in (True, False):
-        for oid in range(6):
+        for oid in range(16):
             if color == is_yellow and oid == robot_id:
                 continue
             try:
@@ -77,7 +77,6 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
                 obs_key = (color, oid)
                 current_obs_pos[obs_key] = (ox, oy)
 
-                # Predict future position based on velocity estimate
                 pred_x, pred_y = ox, oy
                 if prev_obs_pos and obs_key in prev_obs_pos:
                     px, py = prev_obs_pos[obs_key]
@@ -86,9 +85,8 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
                     pred_x = ox + est_vx * PREDICT_T
                     pred_y = oy + est_vy * PREDICT_T
 
-                # Avoid the predicted position (blend current and predicted)
-                avoid_x = ox * 0.4 + pred_x * 0.6
-                avoid_y = oy * 0.4 + pred_y * 0.6
+                avoid_x = ox * 0.3 + pred_x * 0.7
+                avoid_y = oy * 0.3 + pred_y * 0.7
 
                 rel_obs = world2robot(rpos, (avoid_x, avoid_y))
                 d_obs = math.hypot(rel_obs[0], rel_obs[1])
@@ -98,23 +96,24 @@ def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
 
                 if d_obs < AVOID_DIST and d_obs > 1:
                     if d_obs < AVOID_CRITICAL:
-                        strength = AVOID_STRENGTH * 2.5
+                        strength = AVOID_STRENGTH * 3.0
+                    elif d_obs < AVOID_DIST * 0.5:
+                        ratio = (AVOID_DIST - d_obs) / AVOID_DIST
+                        strength = ratio * AVOID_STRENGTH * 1.8
                     else:
                         ratio = (AVOID_DIST - d_obs) / AVOID_DIST
                         strength = ratio * ratio * AVOID_STRENGTH
 
-                    # Repulsive: push directly away
                     rep_x = -(rel_obs[0] / d_obs) * strength
                     rep_y = -(rel_obs[1] / d_obs) * strength
 
-                    # Tangential: curve around
                     tang_x =  rel_obs[1] / d_obs
                     tang_y = -rel_obs[0] / d_obs
                     if tang_x * rel_target[0] + tang_y * rel_target[1] < 0:
                         tang_x, tang_y = -tang_x, -tang_y
 
-                    avoid_vx += rep_x + tang_x * strength * 0.6
-                    avoid_vy += rep_y + tang_y * strength * 0.6
+                    avoid_vx += rep_x + tang_x * strength * 0.8
+                    avoid_vy += rep_y + tang_y * strength * 0.8
             except Exception:
                 continue
 
@@ -132,21 +131,18 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
     The `waypoints` argument is accepted for API compatibility but ignored.
     """
     frame = None
-    last_ft = 0.0
     prev_obs_pos = {}  # for predictive avoidance
 
     while is_running.is_set():
         now = time.time()
 
-        # ── Fetch frame ──────────────────────────────────────
-        if now - last_ft > FRAME_INTERVAL:
-            try:
-                f = wm.get_latest_frame()
-                if f is not None:
-                    frame = f
-            except Exception:
-                pass
-            last_ft = now
+        # ── Fetch frame (every tick for fast obstacle reaction) ─
+        try:
+            f = wm.get_latest_frame()
+            if f is not None:
+                frame = f
+        except Exception:
+            pass
 
         if frame is None or frame.ball is None:
             time.sleep(LOOP_RATE)
@@ -178,7 +174,9 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
 
         # ── Base navigation toward ball ──────────────────────
         if closest_obs < AVOID_CRITICAL:
-            base_speed = CHASE_SPEED * 0.7
+            base_speed = CHASE_SPEED * 0.55
+        elif closest_obs < AVOID_DIST * 0.6:
+            base_speed = CHASE_SPEED * 0.75
         else:
             base_speed = CHASE_SPEED
 
@@ -191,9 +189,9 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
         vx = nav_vx + avoid_vx
         vy = nav_vy + avoid_vy
 
-        # Cap speed so it stays smooth
+        # Cap speed — allow higher when actively dodging
         speed = math.hypot(vx, vy)
-        max_spd = CHASE_SPEED * 1.15   # small headroom for avoidance
+        max_spd = CHASE_SPEED * 1.4 if closest_obs < AVOID_DIST else CHASE_SPEED * 1.15
         if speed > max_spd:
             vx = vx / speed * max_spd
             vy = vy / speed * max_spd
