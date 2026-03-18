@@ -1,10 +1,15 @@
 """
-Striker AI — simple, reliable, effective.
+Striker AI — arc-based approach, committed-side hysteresis, smooth deceleration.
 
-Three states:
-  WAIT     — ball in opponent defense area → hold outside, face ball
-  KICK     — ball on dribbler → face aim, fire when aligned
-  APPROACH — navigate to behind-ball point, face ball, drive through
+Eliminates the looping / oscillation that plagued the old approach logic.
+The robot now takes clean curved paths around the ball to line up behind it,
+then drives straight through toward the aim target.
+
+States:
+  WAIT      — ball in a penalty box → hold outside, face ball
+  APPROACH  — arc around ball if on wrong side, then navigate to behind-ball
+  CHARGE    — close to behind-ball point → drive through ball, dribble
+  POSSESS   — ball on dribbler → face aim, kick when aligned
 """
 
 import time
@@ -12,6 +17,7 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
+from TeamControl.robot.path_planner import compute_arc_nav, move_with_ramp
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -22,6 +28,7 @@ from TeamControl.robot.constants import (
     KICK_COOLDOWN, LOOP_RATE, FRAME_INTERVAL,
     BALL_HISTORY_SIZE, FRICTION, INTERCEPT_MAX_T, INTERCEPT_STEPS,
     BALL_MOVING_THRESH, PRESSURE_DIST,
+    DEFENSE_DEPTH,
 )
 
 
@@ -31,11 +38,14 @@ def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-def _move(rel, speed):
-    """Unit-direction velocity toward a robot-local point."""
+def _move(rel, speed, ramp_dist=350.0, stop_dist=25.0, min_speed=0.10):
+    """Unit-direction velocity with linear deceleration near target."""
     d = math.hypot(rel[0], rel[1])
-    if d < 1:
+    if d < stop_dist:
         return 0.0, 0.0
+    if d < ramp_dist:
+        t = (d - stop_dist) / max(ramp_dist - stop_dist, 1.0)
+        speed = max(speed * t, min_speed)
     return (rel[0] / d) * speed, (rel[1] / d) * speed
 
 
@@ -156,6 +166,9 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     ball_hist = []
     last_bxy = None
 
+    # ── Persistent state for arc approach ─────────────────────────
+    committed_side = None   # +1 / -1: which side to arc around the ball
+
     while is_running.is_set():
         now = time.time()
 
@@ -225,29 +238,12 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         gk_x, gk_y = _find_goalie(frame, is_yellow, goal_x)
         aim = _pick_aim(ball, goal_x, gk_y, gk_x)
 
-        # ── Direction: ball → aim (world frame) ────────────────
-        ba_dx = aim[0] - target_ball[0]
-        ba_dy = aim[1] - target_ball[1]
-        ba_d = max(math.hypot(ba_dx, ba_dy), 1.0)
-        ba_ux = ba_dx / ba_d
-        ba_uy = ba_dy / ba_d
-
-        # Point behind ball (opposite the aim direction)
-        behind = (target_ball[0] - ba_ux * BEHIND_DIST,
-                  target_ball[1] - ba_uy * BEHIND_DIST)
-
         # ── Robot-local vectors ────────────────────────────────
         rel_ball = world2robot(rpos, ball)
         rel_aim = world2robot(rpos, aim)
         d_ball = math.hypot(rel_ball[0], rel_ball[1])
         ang_ball = math.atan2(rel_ball[1], rel_ball[0])
         ang_aim = math.atan2(rel_aim[1], rel_aim[0])
-
-        # Robot position in the ball→aim reference frame
-        rbx = rpos[0] - target_ball[0]
-        rby = rpos[1] - target_ball[1]
-        along = rbx * ba_ux + rby * ba_uy       # >0 = wrong side
-        perp = rbx * (-ba_uy) + rby * ba_ux     # lateral offset
 
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
@@ -264,6 +260,7 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             rel_w = world2robot(rpos, wait)
             vx, vy = _move(rel_w, CRUISE_SPEED)
             w = _clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+            committed_side = None   # reset arc state
 
         elif _in_penalty_box(ball[0], ball[1], our_goal_x):
             inward = -1.0 if our_goal_x > 0 else 1.0
@@ -272,13 +269,15 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             rel_w = world2robot(rpos, wait)
             vx, vy = _move(rel_w, CRUISE_SPEED)
             w = _clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+            committed_side = None
 
         # ═══════════════════════════════════════════════════════
-        #  KICK — ball on the dribbler
+        #  POSSESS — ball on the dribbler
         # ═══════════════════════════════════════════════════════
         elif d_ball < KICK_RANGE and rel_ball[0] > 0:
             dribble = 1
-            vx, vy = _move(rel_ball, DRIBBLE_SPEED * 0.5)
+            vx, vy = _move(rel_ball, DRIBBLE_SPEED * 0.5, ramp_dist=150, stop_dist=15)
+            committed_side = None   # reset arc state
 
             if abs(ang_ball) > 0.4:
                 # Ball not centered — rotate to face it first
@@ -311,53 +310,60 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                     last_kick = now
 
         # ═══════════════════════════════════════════════════════
-        #  APPROACH — navigate to behind-ball, then drive through
+        #  APPROACH — arc around ball, then drive through
         # ═══════════════════════════════════════════════════════
         else:
-            # If we're between the ball and the goal (wrong side),
-            # detour laterally so we don't push the ball away.
-            if along > 50 and d_ball < AVOID_RADIUS * 2:
-                side = 1.0 if perp >= 0 else -1.0
-                nav = (
-                    target_ball[0]
-                    + (-ba_uy) * side * AVOID_RADIUS * 0.8
-                    - ba_ux * BEHIND_DIST,
-                    target_ball[1]
-                    + ba_ux * side * AVOID_RADIUS * 0.8
-                    - ba_uy * BEHIND_DIST,
-                )
-            else:
-                nav = behind
+            # Use arc navigation to get behind the ball smoothly
+            nav, committed_side, is_behind = compute_arc_nav(
+                robot_xy=(rpos[0], rpos[1]),
+                ball=target_ball,
+                aim=aim,
+                behind_dist=BEHIND_DIST,
+                avoid_radius=AVOID_RADIUS,
+                committed_side=committed_side,
+            )
 
-            # Stay out of both penalty boxes
-            if _in_penalty_box(nav[0], nav[1], goal_x):
-                inward = -1.0 if goal_x > 0 else 1.0
-                nav = (goal_x + inward * (PENALTY_DEPTH + 120),
-                       nav[1])
-            if _in_penalty_box(nav[0], nav[1], our_goal_x):
-                inward = -1.0 if our_goal_x > 0 else 1.0
-                nav = (our_goal_x + inward * (PENALTY_DEPTH + 120),
-                       nav[1])
+            # Clamp nav to stay out of both penalty boxes
+            for gx in (goal_x, our_goal_x):
+                if _in_penalty_box(nav[0], nav[1], gx):
+                    inward = -1.0 if gx > 0 else 1.0
+                    nav = (gx + inward * (PENALTY_DEPTH + 120), nav[1])
 
             rel_nav = world2robot(rpos, nav)
             d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
-            if d_nav < 180 and d_ball < BALL_NEAR:
-                # Reached behind point — advance into the ball
+            if is_behind and d_nav < 200 and d_ball < BALL_NEAR:
+                # We've lined up behind the ball — charge through it
                 dribble = 1
-                vx, vy = _move(rel_ball, CHARGE_SPEED)
+                vx, vy = _move(rel_ball, CHARGE_SPEED, ramp_dist=200, stop_dist=15)
+                w = _clamp(ang_aim * TURN_GAIN * 0.7, -MAX_W, MAX_W)
+            elif is_behind and d_nav < 350:
+                # Close to behind point — approach at controlled speed
+                dribble = 1 if d_ball < BALL_NEAR else 0
+                vx, vy = _move(rel_nav, CHARGE_SPEED, ramp_dist=300, stop_dist=20)
+                # Face the ball to be ready for contact
+                w = _clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
             else:
-                # Navigate to the behind-ball point
+                # Navigate toward arc waypoint or behind-ball point
                 if d_nav > 1200:
                     speed = SPRINT_SPEED
                 elif d_nav > 500:
                     speed = CRUISE_SPEED
                 else:
                     speed = CHARGE_SPEED
-                vx, vy = _move(rel_nav, speed)
+                vx, vy = _move(rel_nav, speed, ramp_dist=400, stop_dist=30)
 
-            # Always face the ball
-            w = _clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+                # Face the ball while approaching
+                w = _clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+
+        # ── Rotation compensation ───────────────────────────
+        # Pre-rotate velocity to account for simultaneous rotation,
+        # so the world-frame path stays on target while facing the ball.
+        if abs(w) > 0.01:
+            half_rot = -w * LOOP_RATE * 0.5
+            cos_r = math.cos(half_rot)
+            sin_r = math.sin(half_rot)
+            vx, vy = vx * cos_r - vy * sin_r, vx * sin_r + vy * cos_r
 
         cmd = RobotCommand(robot_id=robot_id, vx=vx, vy=vy, w=w,
                            kick=kick, dribble=dribble,

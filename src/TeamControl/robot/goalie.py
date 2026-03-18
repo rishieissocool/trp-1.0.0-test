@@ -1,13 +1,11 @@
 """
-Elite goalie AI — lightning reflexes, smart positioning, tactical distribution.
+Goalie AI — smooth movement, fast saves, smart clearing.
 
-Key improvements:
-- Wall-bounce prediction: detect shots that will ricochet off walls into goal
-- Multi-stage saves: lateral positioning + forward dive
-- Predictive positioning: weight toward most dangerous attackers
-- Smart distribution: look for teammates to pass to, not just blind clearance
-- Aggressive angle narrowing with distance-adaptive advance
-- Chip-kick detection: react to lob shots
+Key improvements over previous version:
+- _move() with deceleration ramp: no more overshoot at target positions
+- Smoother save transitions: near-instant response to shots
+- Better clearing: dribble toward clear angle before kicking
+- Smart distribution: pass to open teammates when possible
 """
 
 import time
@@ -33,10 +31,14 @@ def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-def _move(rel, speed):
+def _move(rel, speed, ramp_dist=250.0, stop_dist=20.0, min_speed=0.08):
+    """Move toward a robot-local point with smooth deceleration near target."""
     d = math.hypot(rel[0], rel[1])
-    if d < 1:
+    if d < stop_dist:
         return 0.0, 0.0
+    if d < ramp_dist:
+        t = (d - stop_dist) / max(ramp_dist - stop_dist, 1.0)
+        speed = max(speed * t, min_speed)
     return (rel[0] / d) * speed, (rel[1] / d) * speed
 
 
@@ -70,7 +72,6 @@ def _predict_shot_with_bounce(ball, bvx, bvy, goal_back_x, sign):
         bx += vx * step
         by += vy * step
 
-        # Wall bounces
         if by > HALF_WID:
             by = 2 * HALF_WID - by
             vy = -vy
@@ -78,17 +79,14 @@ def _predict_shot_with_bounce(ball, bvx, bvy, goal_back_x, sign):
             by = -2 * HALF_WID - by
             vy = -vy
 
-        # Friction
         f = max(1.0 - FRICTION * step, 0.0)
         vx *= f
         vy *= f
         t += step
 
-        # Ball too slow
         if math.hypot(vx, vy) < 40:
             return False, 0.0
 
-        # Check if crossed goal line
         if sign > 0 and bx >= goal_back_x:
             if abs(by) < GOAL_HW + 250:
                 return True, _clamp(by, -GOAL_HW, GOAL_HW)
@@ -102,7 +100,7 @@ def _predict_shot_with_bounce(ball, bvx, bvy, goal_back_x, sign):
 
 
 def _detect_dangerous_attacker(frame, is_yellow, ball, goal_back_x, sign):
-    """Find the most dangerous opponent — the one with best shooting angle."""
+    """Find the most dangerous opponent — the one closest to ball near our goal."""
     opp_yellow = not is_yellow
     most_dangerous_y = None
     best_threat = -1
@@ -115,11 +113,10 @@ def _detect_dangerous_attacker(frame, is_yellow, ball, goal_back_x, sign):
             op = opp.position
             ox, oy = float(op[0]), float(op[1])
 
-            # Threat = close to ball + facing our goal
             d_ball = math.hypot(ox - ball[0], oy - ball[1])
             d_goal = abs(ox - goal_back_x)
 
-            if d_ball < 800:  # near ball = dangerous
+            if d_ball < 800:
                 threat = (800 - d_ball) / 800 + max(0, 1 - d_goal / HALF_LEN)
                 if threat > best_threat:
                     best_threat = threat
@@ -143,19 +140,15 @@ def _find_pass_target(rpos, ball, frame, is_yellow, goal_back_x, opps_positions)
             mp = mate.position
             mx, my = float(mp[0]), float(mp[1])
 
-            # Skip if in defense area
             if abs(mx - goal_back_x) < DEFENSE_DEPTH and abs(my) < DEFENSE_HALF_WIDTH:
                 continue
 
-            # Skip if too close
             d_from_gk = math.hypot(mx - rpos[0], my - rpos[1])
             if d_from_gk < 500:
                 continue
 
-            # Check pass lane clear of opponents
             lane_clear = True
             for ox, oy in opps_positions:
-                # Point-to-segment distance
                 dx, dy = mx - ball[0], my - ball[1]
                 l2 = dx * dx + dy * dy
                 if l2 < 1:
@@ -170,7 +163,6 @@ def _find_pass_target(rpos, ball, frame, is_yellow, goal_back_x, opps_positions)
             if not lane_clear:
                 continue
 
-            # Score: prefer distance from our goal (safer distribution)
             advance = abs(mx - goal_back_x) / FIELD_LENGTH
             score = advance
 
@@ -272,7 +264,6 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
         pred_y = 0.0
 
         if ball_toward_us and ball_speed > SHOT_SPEED:
-            # First try direct shot prediction
             if abs(bvx) > 40:
                 t_cross = (goal_back_x - ball[0]) / bvx
                 if 0 < t_cross < 2.0:
@@ -281,7 +272,6 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
                         shot_incoming = True
                         pred_y = _clamp(pred_y_raw, -GOAL_HW, GOAL_HW)
 
-            # If no direct hit, check wall-bounce trajectories
             if not shot_incoming and ball_speed > SHOT_SPEED * 1.2:
                 hit, bounce_y = _predict_shot_with_bounce(
                     ball, bvx, bvy, goal_back_x, sign)
@@ -298,7 +288,6 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
                        and abs(ball[1]) < PENALTY_HW)
         ball_slow = ball_speed < CLEAR_BALL_SPEED
 
-        # Collect opponent positions for pass lane checks
         opps_positions = []
         try:
             opp_yellow = not is_yellow
@@ -317,13 +306,12 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
 
         # ── Compute raw target ────────────────────────────────────
         if ball_in_box and ball_slow and d_ball < CLEAR_BALL_DIST:
-            # CLEAR / DISTRIBUTE: slow ball in our box
+            # CLEAR / DISTRIBUTE
             raw_target = ball
             speed = CLEAR_SPEED
             smooth_alpha = 0.75
 
             if d_ball < KICK_DIST and rel_ball[0] > 0:
-                # Look for a teammate to pass to first
                 pass_tgt = _find_pass_target(
                     rpos, ball, frame, is_yellow, goal_back_x, opps_positions)
 
@@ -336,7 +324,6 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
                     else:
                         dribble = 1
                 else:
-                    # Fallback: clear toward sideline
                     clear_pt = _clear_direction(ball, goal_back_x)
                     rel_clear = world2robot(rpos, clear_pt)
                     ang_clear = math.atan2(rel_clear[1], rel_clear[0])
@@ -349,30 +336,26 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
                 dribble = 1
 
         elif shot_incoming:
-            # SAVE: shot heading for goal — get to predicted crossing FAST
+            # SAVE — near-instant response
             save_x = goal_back_x + (ball[0] - goal_back_x) * 0.10
             raw_target = (save_x, pred_y)
             speed = SAVE_SPEED
-            smooth_alpha = 0.93  # near-instant for saves
+            smooth_alpha = 0.95
 
         else:
-            # POSITION: narrow the shooting angle aggressively
+            # POSITION — narrow the shooting angle
             gm_x = ball[0] - goal_mouth[0]
             gm_y = ball[1] - goal_mouth[1]
             gm_d = math.hypot(gm_x, gm_y)
 
             if gm_d > 1:
-                # Advance more aggressively when ball is close
                 advance_ratio = 1.0 - _clamp(ball_dist / (FIELD_LENGTH * 0.5), 0, 1)
-                # Boost advance when ball is in danger zone
                 if ball_dist < DANGER_ZONE:
                     advance_ratio = min(1.0, advance_ratio * 1.5)
 
-                # Weight positioning toward dangerous attacker
                 danger_y = _detect_dangerous_attacker(
                     frame, is_yellow, ball, goal_back_x, sign)
                 if danger_y is not None and ball_dist < DANGER_ZONE:
-                    # Bias toward where the most dangerous attacker would shoot
                     bias = _clamp(danger_y * 0.15, -80, 80)
                 else:
                     bias = 0
@@ -387,7 +370,6 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
             else:
                 raw_target = goal_mouth
 
-            # Speed based on urgency
             if ball_dist < DANGER_ZONE * 0.6:
                 speed = RETREAT_SPEED
             elif ball_dist < DANGER_ZONE:
@@ -404,7 +386,6 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
             smooth_x += smooth_alpha * (raw_target[0] - smooth_x)
             smooth_y += smooth_alpha * (raw_target[1] - smooth_y)
 
-        # Hard clamp — goalie must never leave the penalty box
         smooth_x, smooth_y = _clamp_to_penalty_box(
             smooth_x, smooth_y, goal_back_x)
         target = (smooth_x, smooth_y)
@@ -412,20 +393,14 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
         rel_target = world2robot(rpos, target)
         d_target = math.hypot(rel_target[0], rel_target[1])
 
-        # Dead zone
-        if d_target < 20:
+        if d_target < 15:
             vx, vy = 0.0, 0.0
         else:
-            vx, vy = _move(rel_target, speed)
-            # Proportional deceleration near target (softer curve)
-            if d_target < 100:
-                scale = d_target / 100.0
-                vx *= scale
-                vy *= scale
+            vx, vy = _move(rel_target, speed, ramp_dist=220, stop_dist=15)
 
         # Face the ball at all times
         ang_ball = math.atan2(rel_ball[1], rel_ball[0])
-        if abs(ang_ball) < 0.05:
+        if abs(ang_ball) < 0.04:
             w = 0.0
         else:
             w = _clamp(ang_ball * FACE_BALL_GAIN, -MAX_W, MAX_W)

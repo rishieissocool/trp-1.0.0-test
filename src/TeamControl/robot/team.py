@@ -23,6 +23,7 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
+from TeamControl.robot.path_planner import compute_arc_nav
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -673,17 +674,20 @@ def _defender_targets(ball, our, opps, our_gx, opp_gx, dids, we_have, poss_state
 #  COMMAND BUILDER
 # ════════════════════════════════════════════════════════════════════
 
-def _cmd(rid, rpos, target, face, speed, kick, dribble, yellow):
+def _cmd(rid, rpos, target, face, speed, kick, dribble, yellow,
+         ramp_dist=350.0, stop_dist=20.0):
     rel_t = world2robot(rpos, target)
     rel_f = world2robot(rpos, face)
     d = math.hypot(rel_t[0], rel_t[1])
 
-    if d < 20:
+    if d < stop_dist:
         vx, vy = 0.0, 0.0
     else:
         s = speed
-        if d < 180:
-            s *= d / 180
+        # Linear deceleration ramp — prevents overshoot at target
+        if d < ramp_dist:
+            t = (d - stop_dist) / max(ramp_dist - stop_dist, 1.0)
+            s = max(speed * t, 0.10)
         ux, uy = rel_t[0] / d, rel_t[1] / d
         vx, vy = ux * s, uy * s
 
@@ -699,7 +703,8 @@ def _cmd(rid, rpos, target, face, speed, kick, dribble, yellow):
 # ════════════════════════════════════════════════════════════════════
 
 def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
-              yellow, lkt, now, poss_state):
+              yellow, lkt, now, poss_state, committed_side=None):
+    """Returns (RobotCommand, updated_committed_side)."""
     rel_ball = world2robot(rpos, ball)
     d_ball = math.hypot(rel_ball[0], rel_ball[1])
     atk = 1 if opp_gx > 0 else -1
@@ -710,7 +715,7 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
             inw = -1 if gx > 0 else 1
             wait = (gx + inw * (PENALTY_DEPTH + 120),
                     _cl(ball[1], -PENALTY_HW, PENALTY_HW))
-            return _cmd(rid, rpos, wait, ball, SPD_CRUISE, 0, 0, yellow)
+            return _cmd(rid, rpos, wait, ball, SPD_CRUISE, 0, 0, yellow), None
 
     # Evaluate options
     shoot_sc = _shot_score(ball, opp_gx, opps, gk_pos)
@@ -725,13 +730,11 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
     aim = (opp_gx, 0)
 
     if poss_state == 'COUNTER':
-        # Counter-attack: bias toward shooting, be more aggressive
         if shoot_sc >= SHOOT_THRESH * 0.8:
             action, aim = 'shoot', shot_tgt
         elif pass_tgt is not None and pass_sc > PASS_THRESH * 0.7:
             action, aim = 'pass', pass_tgt
         else:
-            # Drive forward aggressively
             aim = (opp_gx, ball[1] * 0.3)
             aim = _safe_pos(aim[0], aim[1], our_gx, opp_gx)
     elif shoot_sc >= SHOOT_THRESH and (pass_tgt is None or shoot_sc >= pass_sc * 0.80):
@@ -753,68 +756,63 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
     if d_ball < KICK_RANGE and rel_ball[0] > -60:
         ang_ball = math.atan2(rel_ball[1], rel_ball[0])
         if abs(ang_ball) > 0.45:
-            # Ball is to the side — face it first so the kicker can contact
-            return _cmd(rid, rpos, ball, ball, SPD_DRIBBLE, 0, 1, yellow)
+            return _cmd(rid, rpos, ball, ball, SPD_DRIBBLE, 0, 1, yellow), None
 
         ra = world2robot(rpos, aim)
         ang = abs(math.atan2(ra[1], ra[0]))
 
         if action == 'shoot':
             if ang < 0.36 and cd_ok:
-                return _cmd(rid, rpos, ball, aim, SPD_APPROACH, 1, 0, yellow)
-            return _cmd(rid, rpos, aim, aim, SPD_POSSESS, 0, 1, yellow)
+                return _cmd(rid, rpos, ball, aim, SPD_APPROACH, 1, 0, yellow), None
+            return _cmd(rid, rpos, aim, aim, SPD_POSSESS, 0, 1, yellow), None
 
         if action == 'pass' and pass_tgt:
             still_safe = _pass_safe(ball, pass_tgt, opps)
             if ang < 0.48 and cd_ok and still_safe:
-                return _cmd(rid, rpos, ball, pass_tgt, SPD_APPROACH, 1, 0, yellow)
+                return _cmd(rid, rpos, ball, pass_tgt, SPD_APPROACH, 1, 0, yellow), None
             if still_safe:
-                return _cmd(rid, rpos, pass_tgt, pass_tgt, SPD_POSSESS, 0, 1, yellow)
+                return _cmd(rid, rpos, pass_tgt, pass_tgt, SPD_POSSESS, 0, 1, yellow), None
             if shoot_sc >= SHOOT_THRESH:
                 ra2 = world2robot(rpos, shot_tgt)
                 if abs(math.atan2(ra2[1], ra2[0])) < 0.36 and cd_ok:
-                    return _cmd(rid, rpos, ball, shot_tgt, SPD_APPROACH, 1, 0, yellow)
-                return _cmd(rid, rpos, shot_tgt, shot_tgt, SPD_POSSESS, 0, 1, yellow)
+                    return _cmd(rid, rpos, ball, shot_tgt, SPD_APPROACH, 1, 0, yellow), None
+                return _cmd(rid, rpos, shot_tgt, shot_tgt, SPD_POSSESS, 0, 1, yellow), None
 
-        # Emergency flick under pressure
         if pressed and cd_ok:
             if pass_tgt and _pass_safe(ball, pass_tgt, opps):
                 ra2 = world2robot(rpos, pass_tgt)
                 if abs(math.atan2(ra2[1], ra2[0])) < 0.55:
-                    return _cmd(rid, rpos, ball, pass_tgt, SPD_APPROACH, 1, 0, yellow)
-            elif ang < 0.7:  # Just blast it toward goal
-                return _cmd(rid, rpos, ball, aim, SPD_APPROACH, 1, 0, yellow)
+                    return _cmd(rid, rpos, ball, pass_tgt, SPD_APPROACH, 1, 0, yellow), None
+            elif ang < 0.7:
+                return _cmd(rid, rpos, ball, aim, SPD_APPROACH, 1, 0, yellow), None
 
-        return _cmd(rid, rpos, aim, aim, SPD_DRIBBLE, 0, 1, yellow)
+        return _cmd(rid, rpos, aim, aim, SPD_DRIBBLE, 0, 1, yellow), None
 
     # ══════════════════════════════════════════════════════════
-    #  APPROACH — line up behind ball toward aim target
+    #  APPROACH — arc around ball, then drive through
     # ══════════════════════════════════════════════════════════
     tb = intercept_pt if d_ball > BALL_NEAR else ball
 
-    dx, dy = aim[0] - tb[0], aim[1] - tb[1]
-    ux, uy = _norm(dx, dy)
-    behind = (tb[0] - ux * BEHIND_DIST, tb[1] - uy * BEHIND_DIST)
-
-    rbx, rby = rpos[0] - tb[0], rpos[1] - tb[1]
-    along = _dot(rbx, rby, ux, uy)
-
-    if along > 50 and d_ball < AVOID_R * 2.5:
-        px, py = -uy, ux
-        side = 1.0 if _dot(rbx, rby, px, py) > 0 else -1.0
-        nav = (tb[0] - ux * BEHIND_DIST + px * side * AVOID_R,
-               tb[1] - uy * BEHIND_DIST + py * side * AVOID_R)
-    else:
-        nav = behind
+    # Use arc navigation with committed side for smooth approach
+    nav, committed_side, is_behind = compute_arc_nav(
+        robot_xy=(rpos[0], rpos[1]),
+        ball=tb,
+        aim=aim,
+        behind_dist=BEHIND_DIST,
+        avoid_radius=AVOID_R,
+        committed_side=committed_side,
+    )
 
     nav = _safe_pos(nav[0], nav[1], our_gx, opp_gx)
 
-    if d_ball < BALL_NEAR:
-        ra = world2robot(rpos, aim)
-        if abs(math.atan2(ra[1], ra[0])) < 0.60:
-            return _cmd(rid, rpos, ball, ball, SPD_APPROACH, 0, 1, yellow)
+    d_nav = _dist((rpos[0], rpos[1]), nav)
 
-    # Speed selection — counter-attack gets sprint speed
+    if is_behind and d_nav < 200 and d_ball < BALL_NEAR:
+        # Lined up behind ball — charge through
+        return _cmd(rid, rpos, ball, ball, SPD_APPROACH, 0, 1, yellow,
+                    ramp_dist=200), committed_side
+
+    # Speed selection
     if poss_state == 'COUNTER':
         speed = SPD_COUNTER if d_ball > 800 else SPD_SPRINT
     elif d_ball > 1600:
@@ -825,7 +823,8 @@ def _attacker(rid, rpos, ball, bvel, our, opps, our_gx, opp_gx, gk_pos,
         speed = SPD_APPROACH
     drib = 1 if d_ball < BALL_NEAR else 0
 
-    return _cmd(rid, rpos, nav, ball, speed, 0, drib, yellow)
+    return _cmd(rid, rpos, nav, ball, speed, 0, drib, yellow,
+                ramp_dist=400), committed_side
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -994,6 +993,7 @@ def run_team(is_running, dispatch_q, wm, is_yellow, goalie_id=0):
     gk_smooth   = [None, None]
     prev_winner = None
     poss        = _PossessionTracker()
+    committed_sides = {}   # robot_id → committed arc side (+1/-1 or None)
 
     while is_running.is_set():
         now = time.time()
@@ -1102,19 +1102,23 @@ def run_team(is_running, dispatch_q, wm, is_yellow, goalie_id=0):
                             our_2d, our_gx, opp_gx, is_yellow,
                             lk, now, gk_smooth)
             elif rid == winner:
-                c = _attacker(rid, rpos, ball, bvel, our_2d, opps,
-                              our_gx, opp_gx, gk_opp, is_yellow,
-                              lk, now, poss.state)
+                cs = committed_sides.get(rid)
+                c, cs = _attacker(rid, rpos, ball, bvel, our_2d, opps,
+                                  our_gx, opp_gx, gk_opp, is_yellow,
+                                  lk, now, poss.state, cs)
+                committed_sides[rid] = cs
             elif rid in sup_ids:
                 fb = _safe_pos(ball[0], ball[1] + 1500, our_gx, opp_gx)
                 tgt = sup_tgts.get(rid, fb)
                 c = _support(rid, rpos, ball, tgt, our_gx, opp_gx,
                              is_yellow, poss.state)
+                committed_sides.pop(rid, None)  # reset when not attacking
             elif rid in def_ids:
                 fb = _safe_pos_def(our_gx, 0, our_gx, opp_gx)
                 tgt = def_tgts.get(rid, fb)
                 c = _defender(rid, rpos, ball, tgt, our_gx, opp_gx,
                               is_yellow, poss.state)
+                committed_sides.pop(rid, None)
             else:
                 continue
 

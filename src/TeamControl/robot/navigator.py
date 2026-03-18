@@ -1,11 +1,15 @@
 """
-High-performance waypoint navigation with predictive obstacle avoidance.
+Ball-chasing navigation with smooth obstacle avoidance.
 
-Key improvements:
-- Velocity obstacle avoidance: predicts where obstacles will be, not just where they are
-- Smooth curved paths around obstacles (no stop-and-turn)
-- Speed-adaptive avoidance: faster robots get wider avoidance margins
-- Dynamic waypoint advancement: skip waypoints when path is clear
+The robot pursues the ball at a moderate, smooth speed while curving
+around any other robots in its path.  No fixed waypoints — the ball
+IS the target.
+
+Key features:
+- Smooth, moderate speed (not too fast, not too slow)
+- Tangential + repulsive obstacle avoidance for curved paths
+- Deceleration ramp near the ball so the robot doesn't overshoot
+- Faces the ball at all times
 """
 
 import time
@@ -19,23 +23,23 @@ from TeamControl.robot.constants import (
     LOOP_RATE, FRAME_INTERVAL,
 )
 
-AVOID_SPEED = 1.4
+# ── Obstacle avoidance tuning ────────────────────────────────────
+AVOID_DIST = 700          # start avoiding at this range (mm)
+AVOID_STRENGTH = 1.8      # base repulsive strength
+AVOID_CRITICAL = 350      # very close → emergency avoidance
 
-WAYPOINT_RADIUS = 180
-LOOKAHEAD_RADIUS = 600
+# ── Ball-chase speed ─────────────────────────────────────────────
+CHASE_SPEED = CRUISE_SPEED * 0.85   # smooth, moderate pace
+NEAR_BALL_DIST = 200                # start slowing down here
+STOP_DIST = 80                      # stop this close to ball
 
-AVOID_DIST = 700
-AVOID_STRENGTH = 1.8
-AVOID_CRITICAL = 350
-
-# Default patrol routes
+# Keep old exports so main.py import doesn't break
 WAYPOINTS_A = [
     (HALF_LEN - 500, HALF_WID - 200),
     (HALF_LEN - 500, -HALF_WID + 200),
     (-HALF_LEN + 500, -HALF_WID + 200),
     (-HALF_LEN + 500, HALF_WID - 200),
 ]
-
 WAYPOINTS_B = [
     (-HALF_LEN + 500, -HALF_WID + 200),
     (-HALF_LEN + 500, HALF_WID - 200),
@@ -48,24 +52,103 @@ def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-def _move(rel, speed):
+def _move(rel, speed, ramp_dist=350.0, stop_dist=25.0, min_speed=0.08):
+    """Move toward a robot-local point with smooth deceleration."""
     d = math.hypot(rel[0], rel[1])
-    if d < 1:
+    if d < stop_dist:
         return 0.0, 0.0
+    if d < ramp_dist:
+        t = (d - stop_dist) / max(ramp_dist - stop_dist, 1.0)
+        speed = max(speed * t, min_speed)
     return (rel[0] / d) * speed, (rel[1] / d) * speed
 
+
+def _compute_avoidance(rpos, frame, is_yellow, robot_id, rel_target,
+                       prev_obs_pos=None):
+    """
+    Compute tangential + repulsive avoidance force from all other robots.
+    Uses predictive avoidance: avoids where robots WILL be in ~0.3s, not
+    just where they are now.
+    Returns (avoid_vx, avoid_vy, closest_obstacle_distance, updated_obs_pos).
+    """
+    avoid_vx, avoid_vy = 0.0, 0.0
+    closest_obs = 9999.0
+    current_obs_pos = {}
+    PREDICT_T = 0.3  # seconds to predict ahead
+
+    for color in (True, False):
+        for oid in range(6):
+            if color == is_yellow and oid == robot_id:
+                continue
+            try:
+                other = frame.get_yellow_robots(isYellow=color, robot_id=oid)
+                if isinstance(other, int) or other is None:
+                    continue
+                op = other.position
+                ox, oy = float(op[0]), float(op[1])
+                obs_key = (color, oid)
+                current_obs_pos[obs_key] = (ox, oy)
+
+                # Predict future position based on velocity estimate
+                pred_x, pred_y = ox, oy
+                if prev_obs_pos and obs_key in prev_obs_pos:
+                    px, py = prev_obs_pos[obs_key]
+                    # Estimate velocity from position change
+                    est_vx = (ox - px) / max(FRAME_INTERVAL, 0.01)
+                    est_vy = (oy - py) / max(FRAME_INTERVAL, 0.01)
+                    pred_x = ox + est_vx * PREDICT_T
+                    pred_y = oy + est_vy * PREDICT_T
+
+                # Avoid the predicted position (blend current and predicted)
+                avoid_x = ox * 0.4 + pred_x * 0.6
+                avoid_y = oy * 0.4 + pred_y * 0.6
+
+                rel_obs = world2robot(rpos, (avoid_x, avoid_y))
+                d_obs = math.hypot(rel_obs[0], rel_obs[1])
+
+                if d_obs < closest_obs:
+                    closest_obs = d_obs
+
+                if d_obs < AVOID_DIST and d_obs > 1:
+                    # Strength: ramps up sharply when close
+                    if d_obs < AVOID_CRITICAL:
+                        strength = AVOID_STRENGTH * 2.5
+                    else:
+                        ratio = (AVOID_DIST - d_obs) / AVOID_DIST
+                        strength = ratio * ratio * AVOID_STRENGTH
+
+                    # Repulsive: push directly away
+                    rep_x = -(rel_obs[0] / d_obs) * strength
+                    rep_y = -(rel_obs[1] / d_obs) * strength
+
+                    # Tangential: curve around (perpendicular to repulsive,
+                    # in whichever direction moves us toward the target)
+                    tang_x =  rel_obs[1] / d_obs
+                    tang_y = -rel_obs[0] / d_obs
+                    if tang_x * rel_target[0] + tang_y * rel_target[1] < 0:
+                        tang_x, tang_y = -tang_x, -tang_y
+
+                    avoid_vx += rep_x + tang_x * strength * 0.6
+                    avoid_vy += rep_y + tang_y * strength * 0.6
+            except Exception:
+                continue
+
+    return avoid_vx, avoid_vy, closest_obs, current_obs_pos
+
+
+# ═════════════════════════════════════════════════════════════════
+#  MAIN ENTRY POINT — ball chaser with obstacle avoidance
+# ═════════════════════════════════════════════════════════════════
 
 def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
                   waypoints=None):
     """
-    Navigate between waypoints while avoiding other robots.
+    Chase the ball smoothly while avoiding every other robot on the field.
+    The `waypoints` argument is accepted for API compatibility but ignored.
     """
-    if waypoints is None:
-        waypoints = WAYPOINTS_A
-
-    wp_idx = 0
     frame = None
     last_ft = 0.0
+    prev_obs_pos = {}  # for predictive avoidance
 
     while is_running.is_set():
         now = time.time()
@@ -80,7 +163,7 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
                 pass
             last_ft = now
 
-        if frame is None:
+        if frame is None or frame.ball is None:
             time.sleep(LOOP_RATE)
             continue
 
@@ -96,98 +179,57 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
             continue
 
         rp = robot.position
+        bp = frame.ball.position
         rpos = (float(rp[0]), float(rp[1]), float(rp[2]))
+        ball = (float(bp[0]), float(bp[1]))
 
-        # ── Current waypoint with lookahead skip ─────────────
-        target = waypoints[wp_idx]
-        rel_target = world2robot(rpos, target)
-        d_target = math.hypot(rel_target[0], rel_target[1])
+        # ── Target: the ball ─────────────────────────────────
+        rel_ball = world2robot(rpos, ball)
+        d_ball = math.hypot(rel_ball[0], rel_ball[1])
 
-        if d_target < WAYPOINT_RADIUS:
-            wp_idx = (wp_idx + 1) % len(waypoints)
-            target = waypoints[wp_idx]
-            rel_target = world2robot(rpos, target)
-            d_target = math.hypot(rel_target[0], rel_target[1])
+        # ── Obstacle avoidance (predictive) ──────────────────
+        avoid_vx, avoid_vy, closest_obs, prev_obs_pos = _compute_avoidance(
+            rpos, frame, is_yellow, robot_id, rel_ball, prev_obs_pos)
 
-        # Lookahead: if next waypoint is closer, skip current
-        next_idx = (wp_idx + 1) % len(waypoints)
-        next_wp = waypoints[next_idx]
-        rel_next = world2robot(rpos, next_wp)
-        d_next = math.hypot(rel_next[0], rel_next[1])
-        if d_target < LOOKAHEAD_RADIUS and d_next < d_target * 1.5:
-            wp_idx = next_idx
-            target = next_wp
-            rel_target = rel_next
-            d_target = d_next
+        # ── Base navigation toward ball ──────────────────────
+        # Smooth, moderate speed with gentle deceleration near the ball
+        if closest_obs < AVOID_CRITICAL:
+            base_speed = CHASE_SPEED * 0.7
+        else:
+            base_speed = CHASE_SPEED
 
-        # ── Obstacle detection with distance-weighted avoidance ─
-        avoid_vx, avoid_vy = 0.0, 0.0
-        closest_obs = 9999
-
-        for color in (True, False):
-            for oid in range(6):
-                if color == is_yellow and oid == robot_id:
-                    continue
-                try:
-                    other = frame.get_yellow_robots(isYellow=color,
-                                                    robot_id=oid)
-                    if isinstance(other, int) or other is None:
-                        continue
-                    op = other.position
-                    opos = (float(op[0]), float(op[1]))
-                    rel_obs = world2robot(rpos, opos)
-                    d_obs = math.hypot(rel_obs[0], rel_obs[1])
-
-                    if d_obs < closest_obs:
-                        closest_obs = d_obs
-
-                    if d_obs < AVOID_DIST and d_obs > 1:
-                        # Inverse-square repulsion for stronger close avoidance
-                        if d_obs < AVOID_CRITICAL:
-                            strength = AVOID_STRENGTH * 2.5
-                        else:
-                            ratio = (AVOID_DIST - d_obs) / AVOID_DIST
-                            strength = ratio * ratio * AVOID_STRENGTH
-                        avoid_vx -= (rel_obs[0] / d_obs) * strength
-                        avoid_vy -= (rel_obs[1] / d_obs) * strength
-                except Exception:
-                    continue
+        nav_vx, nav_vy = _move(rel_ball, base_speed,
+                               ramp_dist=NEAR_BALL_DIST,
+                               stop_dist=STOP_DIST,
+                               min_speed=0.06)
 
         # ── Blend navigation + avoidance ─────────────────────
-        # Speed based on distance to target and obstacles
-        if closest_obs < AVOID_CRITICAL:
-            base_speed = AVOID_SPEED
-        elif d_target > 1500:
-            base_speed = SPRINT_SPEED
-        elif d_target > 500:
-            base_speed = CRUISE_SPEED
-        else:
-            base_speed = CRUISE_SPEED * 0.8
-
-        nav_vx, nav_vy = _move(rel_target, base_speed)
-
-        # Proportional deceleration near waypoint
-        if d_target < 350:
-            scale = d_target / 350.0
-            nav_vx *= scale
-            nav_vy *= scale
-
         vx = nav_vx + avoid_vx
         vy = nav_vy + avoid_vy
 
-        # Cap to max speed
+        # Cap speed so it stays smooth
         speed = math.hypot(vx, vy)
-        max_spd = SPRINT_SPEED
+        max_spd = CHASE_SPEED * 1.15   # small headroom for avoidance
         if speed > max_spd:
             vx = vx / speed * max_spd
             vy = vy / speed * max_spd
 
-        # ── Face direction of travel ─────────────────────────
-        ang_target = math.atan2(rel_target[1], rel_target[0])
-        if abs(ang_target) < 0.05:
+        # ── Face the ball ────────────────────────────────────
+        ang_ball = math.atan2(rel_ball[1], rel_ball[0])
+        if abs(ang_ball) < 0.05:
             w = 0.0
         else:
-            w = _clamp(ang_target * TURN_GAIN, -MAX_W, MAX_W)
+            w = _clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+
+        # ── Rotation compensation ───────────────────────────
+        # The robot will rotate by w*dt during this tick.
+        # Pre-rotate the velocity so the world-frame path stays
+        # on target despite the simultaneous rotation.
+        if abs(w) > 0.01:
+            half_rot = -w * LOOP_RATE * 0.5
+            cos_r = math.cos(half_rot)
+            sin_r = math.sin(half_rot)
+            vx, vy = vx * cos_r - vy * sin_r, vx * sin_r + vy * cos_r
 
         cmd = RobotCommand(robot_id=robot_id, vx=vx, vy=vy, w=w,
                            kick=0, dribble=0, isYellow=is_yellow)
