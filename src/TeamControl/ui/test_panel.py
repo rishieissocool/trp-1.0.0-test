@@ -740,27 +740,8 @@ class TestPanel(QWidget):
             kick=kick, dribble=dribble, isYellow=is_yellow)
 
     def _send_action(self, cmd: RobotCommand):
-        """Send a command for field actions via grSim.
-
-        Tries the engine's grSim sender first (available when engine is running),
-        then falls back to creating/reusing a grSim connection from the
-        Hardware Test tab's grSim IP/port settings.
-        """
-        # Try engine's grSim sender
-        if self._engine:
-            try:
-                gs = getattr(self._engine, '_grsim_sender', None)
-                if gs is not None:
-                    gs.send_robot_command(cmd)
-                    return
-            except Exception:
-                pass
-        # Fallback: use Hardware Test tab's grSim sender (always works)
-        try:
-            gs = self._get_grsim()
-            gs.send_robot_command(cmd)
-        except Exception:
-            pass
+        """Send a command for field actions — same path as Hardware Test."""
+        self._do_send(cmd)
 
     def _build_cmd(self, vx=None, vy=None, w=None, kick=None, dribble=None):
         return RobotCommand(

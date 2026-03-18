@@ -394,22 +394,8 @@ class CalibrationPage(QWidget):
         cmd = RobotCommand(
             robot_id=rid, vx=vx, vy=vy, w=w,
             kick=kick, dribble=dribble, isYellow=is_yellow)
-        # Try engine's grSim sender first
-        if self._engine:
-            try:
-                gs = getattr(self._engine, '_grsim_sender', None)
-                if gs is not None:
-                    gs.send_robot_command(cmd)
-                    return
-            except Exception:
-                pass
-        # Fallback: use test panel's grSim sender
         if self._test_panel:
-            try:
-                gs = self._test_panel._get_grsim()
-                gs.send_robot_command(cmd)
-            except Exception:
-                pass
+            self._test_panel._do_send(cmd)
 
     def _send_stop(self):
         self._send_cmd()
