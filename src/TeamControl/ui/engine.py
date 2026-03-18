@@ -88,6 +88,7 @@ class SimEngine(QObject):
         self._dispatch_info_q: Queue | None = None
         self._recv_q: Queue | None = None
         self._grsim_sender: grSimSender | None = None
+        self._field_manual_q: Queue | None = None
 
         self._running = False
         self._mode = ""
@@ -111,6 +112,19 @@ class SimEngine(QObject):
     def config(self) -> Config | None:
         return self._config
 
+    def set_field_manual_control(self, shell_id: int, is_yellow: bool, enabled: bool):
+        """
+        While enabled, the dispatcher stops sending to this robot so Dashboard /
+        Hardware Test field commands are not overwritten by AI (goalie, 6v6, …).
+        """
+        if not self._running or self._field_manual_q is None:
+            return
+        try:
+            self._field_manual_q.put_nowait(
+                ("on" if enabled else "off", int(shell_id), bool(is_yellow)))
+        except Exception:
+            pass
+
     # ── Lifecycle ─────────────────────────────────────────────────
 
     def reload_config(self):
@@ -129,6 +143,7 @@ class SimEngine(QObject):
         self._dispatch_q = Queue()
         self._dispatch_info_q = Queue()
         self._recv_q = Queue()
+        self._field_manual_q = Queue()
         self._is_running = Event()
 
         self._wm_manager = WorldModelManager()
@@ -150,7 +165,7 @@ class SimEngine(QObject):
                     daemon=True),
             Process(target=Dispatcher.run_worker,
                     args=(self._is_running, None, self._dispatch_q, preset,
-                          self._dispatch_info_q),
+                          self._dispatch_info_q, self._field_manual_q),
                     daemon=True),
             Process(target=RobotRecv.run_worker,
                     args=(self._is_running, None, self._recv_q),
@@ -207,6 +222,7 @@ class SimEngine(QObject):
         self._wm_manager = None
         self._recv_q = None
         self._dispatch_info_q = None
+        self._field_manual_q = None
         self._running = False
         self._mode = ""
         self._grsim_sender = None

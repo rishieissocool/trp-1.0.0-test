@@ -56,6 +56,10 @@ class Dispatcher(BaseWorker):
                 if sid is not None:
                     self._blue_shell_cache[sid] = robot_dict
 
+        # (shell_id, isYellow) — skip UDP/grSim for these while UI drives the robot
+        self._manual_field_blocked = set()  # {(shell_id, isYellow), ...}
+        self._manual_field_q = args[3] if len(args) >= 4 else None
+
         # self.g_sender = grSimSender()
         self.announce_initialisation()
 
@@ -70,7 +74,22 @@ class Dispatcher(BaseWorker):
     def run(self):
         return super().run()
     
+    def _drain_manual_field_q(self):
+        if self._manual_field_q is None:
+            return
+        try:
+            while True:
+                op, sid, is_y = self._manual_field_q.get_nowait()
+                key = (int(sid), bool(is_y))
+                if op == "on":
+                    self._manual_field_blocked.add(key)
+                else:
+                    self._manual_field_blocked.discard(key)
+        except Exception:
+            pass
+
     def step(self):
+        self._drain_manual_field_q()
         self.check_new_commands()
         now = time.time()
         self.handle_commands(now)
@@ -142,6 +161,8 @@ class Dispatcher(BaseWorker):
             now = time.time()
         shell_id = command.robot_id
         isYellow = command.isYellow
+        if (shell_id, isYellow) in self._manual_field_blocked:
+            return
         robot_dict = self.get_dict_from_shell(shell_id,isYellow)
 
         if self.send_to_grSim is True:

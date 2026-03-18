@@ -101,9 +101,18 @@ class CalibrationPage(QWidget):
 
         splitter = QSplitter(Qt.Horizontal)
 
-        # Left: field canvas
+        # Left: field canvas (separate widget from Dashboard — must wire signals here)
         self._field = FieldCanvas()
         splitter.addWidget(self._field)
+        if self._test_panel is not None:
+            self._field.point_picked.connect(self._test_panel.go_to_point)
+            self._field.action_requested.connect(self._test_panel.field_action)
+        if self._engine is not None:
+            self._field.ball_placed.connect(
+                lambda x, y: self._engine.place_ball(x, y))
+            self._field.robot_placed.connect(
+                lambda rid, yl, x, y: self._engine.place_robot(
+                    rid, yl, x, y))
 
         # Right: scrollable sidebar
         sidebar = QWidget()

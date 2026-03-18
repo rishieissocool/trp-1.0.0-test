@@ -642,6 +642,7 @@ class TestPanel(QWidget):
 
     def _start_action(self, mode):
         self._stop_action()
+        self._set_field_manual_override(True)
         self._action_mode = mode
         self._square_step = 0
         self._square_step_ticks = 0
@@ -658,12 +659,23 @@ class TestPanel(QWidget):
         self._action_status.setText(
             f"Running: {labels.get(mode, mode)} — click STOP to cancel")
         self._log.info(f"Action test started: {labels.get(mode, mode)}")
+        if self._engine and self._engine.current_mode not in ("vision_only",):
+            self._log.info(
+                "(Dispatcher paused for this bot so AI does not override field commands.)")
+
+    def _set_field_manual_override(self, enabled: bool):
+        """Pause AI dispatcher for our bot so field / quick-test commands work."""
+        if not self._engine or not self._engine.is_running:
+            return
+        rid, iy = self._get_action_rid_yellow()
+        self._engine.set_field_manual_control(rid, iy, enabled)
 
     def _stop_action(self):
         if self._action_timer.isActive():
             self._action_timer.stop()
             self._action_mode = None
             self._action_status.setText("")
+            self._set_field_manual_override(False)
             # Send a stop command
             cmd = self._build_action_cmd()
             self._send_action(cmd)
@@ -723,6 +735,7 @@ class TestPanel(QWidget):
         y_mm = max(-_SAFE_Y, min(_SAFE_Y, y_mm))
         self._goto_target = (x_mm, y_mm)
         self._stop_action()
+        self._set_field_manual_override(True)
         self._action_mode = "go_to_point"
         self._action_timer.start()
         self._goto_status.setStyleSheet(
@@ -734,6 +747,9 @@ class TestPanel(QWidget):
             f"color:{SUCCESS}; font-size:12px; padding:4px;")
         self._action_status.setText("Running: Go to Point — click STOP to cancel")
         self._log.info(f"Go to point ({x_mm:.0f}, {y_mm:.0f})")
+        if self._engine and self._engine.current_mode not in ("vision_only",):
+            self._log.info(
+                "(Dispatcher paused for this bot so AI does not override.)")
 
     def _is_near_boundary(self, robot_pose):
         """True if the robot is close to the field edge."""
