@@ -42,8 +42,8 @@ _t = _load_tuning()
 #  FIELD GEOMETRY (mm) — SSL small field 5000 × 3000
 # ═════════════════════════════════════════════════════════════════
 
-FIELD_LENGTH      = 5000
-FIELD_WIDTH       = 3000
+FIELD_LENGTH      = 4500
+FIELD_WIDTH       = 2230
 HALF_LEN          = FIELD_LENGTH / 2
 HALF_WID          = FIELD_WIDTH / 2
 GOAL_WIDTH        = 1000
