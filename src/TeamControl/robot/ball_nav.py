@@ -19,7 +19,9 @@ Pathfinding:
   - compute_arc_nav    — arc approach to get behind the ball
 """
 
+import json
 import math
+import os
 from typing import Tuple, Optional, List
 
 from TeamControl.robot.constants import (
@@ -28,6 +30,32 @@ from TeamControl.robot.constants import (
     BALL_HISTORY_SIZE,
     LOOP_RATE,
 )
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  CALIBRATION — loaded from calibration.json, applied in move_toward
+# ═══════════════════════════════════════════════════════════════════
+
+_CAL_PATH = os.path.normpath(os.path.join(
+    os.path.dirname(__file__), os.pardir, os.pardir, os.pardir,
+    "calibration.json"))
+
+_cal = {"speed_scale": 1.0}
+
+
+def _reload_calibration():
+    """Reload calibration values from disk.  Called at import time
+    and when the calibration UI applies new values."""
+    global _cal
+    try:
+        with open(_CAL_PATH, "r") as f:
+            data = json.load(f)
+        _cal["speed_scale"] = float(data.get("speed_scale", 1.0))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):
+        _cal["speed_scale"] = 1.0
+
+
+_reload_calibration()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -115,6 +143,9 @@ WALL_BRAKE_MIN  = 0.10      # minimum speed factor near walls
 def move_toward(rel, speed, ramp_dist=350.0, stop_dist=10.0, min_speed=0.06):
     """Move toward a robot-local point with linear deceleration ramp.
 
+    Speed is scaled by the calibration factor from calibration.json
+    so commanded speed matches actual robot speed.
+
     Args:
         rel:       (x, y) target in robot frame
         speed:     cruise speed (m/s fraction)
@@ -128,6 +159,10 @@ def move_toward(rel, speed, ramp_dist=350.0, stop_dist=10.0, min_speed=0.06):
     d = math.hypot(rel[0], rel[1])
     if d < stop_dist:
         return 0.0, 0.0
+    # Apply calibration: if robot runs slow, scale > 1 boosts commanded speed
+    cal_scale = _cal.get("speed_scale", 1.0)
+    if cal_scale > 0.01:
+        speed = speed / cal_scale
     if d < ramp_dist:
         t = (d - stop_dist) / max(ramp_dist - stop_dist, 1.0)
         speed = max(speed * t, min_speed)
