@@ -713,7 +713,8 @@ class TestPanel(QWidget):
     def field_action(self, action_name):
         """Called from the field right-click menu."""
         if action_name == "stop":
-            self._send_stop()
+            # Stop any running action and release manual override
+            self._stop_action()
         else:
             self._start_action(action_name)
 
@@ -818,21 +819,35 @@ class TestPanel(QWidget):
         kick = 0
         dribble = 0
 
-        kick_dist = 150   # mm — close enough to fire kick
+        # Behaviour tuning for go_to_ball vs go_to_ball_kick
+        if self._action_mode == "go_to_ball_kick":
+            far_dist = 600.0   # mm — cruise
+            slow_dist = 250.0  # mm — start slowing + dribbling
+            kick_dist = 130.0  # mm — close enough to fire kicker
 
-        if self._action_mode == "go_to_ball_kick" and dist < kick_dist:
-            # Close enough to kick — align and fire
-            dribble = 1
-            vx, vy = move_toward(rel_ball, 0.15, ramp_dist=120, stop_dist=10)
-            w = clamp(angle * 0.5, -MAX_W, MAX_W)
-            if abs(angle) < 0.2:
-                vx = 0.3
-                vy = 0.0
-                kick = 1
-                dribble = 0
+            if dist > far_dist:
+                # Far: move faster to get in the area
+                vx, vy = move_toward(rel_ball, 0.6, ramp_dist=800, stop_dist=slow_dist)
+                w = clamp(angle * 0.6, -MAX_W, MAX_W)
+            elif dist > kick_dist:
+                # Mid: slow down and keep dribbler on while aligning
+                dribble = 1
+                vx, vy = move_toward(rel_ball, 0.25, ramp_dist=400, stop_dist=kick_dist)
+                w = clamp(angle * 0.7, -MAX_W, MAX_W)
+            else:
+                # Very close: line up and fire the real kicker
+                dribble = 1
+                vx, vy = move_toward(rel_ball, 0.12, ramp_dist=150, stop_dist=40)
+                w = clamp(angle * 0.8, -MAX_W, MAX_W)
+                if abs(angle) < 0.18:
+                    # Small straight push then kick
+                    vx = 0.25
+                    vy = 0.0
+                    kick = 1
+                    dribble = 0
         else:
-            # Move toward ball omnidirectionally
-            vx, vy = move_toward(rel_ball, 0.4, ramp_dist=400, stop_dist=70)
+            # Plain go_to_ball: just move toward ball and stop near it
+            vx, vy = move_toward(rel_ball, 0.45, ramp_dist=500, stop_dist=80)
             w = clamp(angle * 0.5, -MAX_W, MAX_W)
 
         # Slow near walls instead of hard stop
