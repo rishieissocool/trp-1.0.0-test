@@ -30,6 +30,8 @@ from TeamControl.robot.constants import (
 APPROACH_SPD   = CHARGE_SPEED       # moderate approach
 DRIBBLE_SPD    = DRIBBLE_SPEED      # gentle when close
 WAIT_SPD       = CRUISE_SPEED * 0.6 # repositioning outside box
+DWELL_TIME     = 0.25               # seconds ball must be stable before kick
+KICK_ALIGN_TOL = 0.12               # rad — alignment tolerance for dwell
 
 
 def _in_penalty_box(px, py, goal_x):
@@ -72,6 +74,8 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     frame = None
     last_ft = 0.0
     committed_side = None
+    dwell_start = 0.0       # when alignment started
+    aligned = False         # True while continuously aligned
 
     while is_running.is_set():
         now = time.time()
@@ -157,18 +161,27 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             # Rotate toward aim target
             w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
 
-            # Kick when aligned to goal
+            # Kick when aligned to goal AND held stable for DWELL_TIME
             dx_goal = abs(goal_x - ball[0])
             kick_tol = clamp(
                 math.atan2(GOAL_WIDTH * 0.35, max(dx_goal, 350)),
                 0.08, 0.35)
 
-            if abs(ang_aim) < kick_tol and (now - last_kick) > KICK_COOLDOWN:
-                kick = 1
-                dribble = 0
-                vx = DRIBBLE_SPD
-                vy = 0.0
-                last_kick = now
+            if abs(ang_aim) < KICK_ALIGN_TOL:
+                if not aligned:
+                    aligned = True
+                    dwell_start = now
+                elif (now - dwell_start) >= DWELL_TIME and \
+                     abs(ang_aim) < kick_tol and \
+                     (now - last_kick) > KICK_COOLDOWN:
+                    kick = 1
+                    dribble = 0
+                    vx = DRIBBLE_SPD
+                    vy = 0.0
+                    last_kick = now
+                    aligned = False
+            else:
+                aligned = False
 
         # ═════════════════════════════════════════════════════
         #  3. APPROACH — arc around ball, get behind, drive in

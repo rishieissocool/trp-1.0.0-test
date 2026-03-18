@@ -476,7 +476,7 @@ class CalibrationPage(QWidget):
         self._begin_pass()
 
     def _begin_pass(self):
-        """Set up waypoints for one pass and start navigating to start."""
+        """Set up waypoints for one pass and start."""
         left_x = -HALF_LEN + _MARGIN
         right_x = HALF_LEN - _MARGIN
         y = self._line_y
@@ -492,15 +492,27 @@ class CalibrationPage(QWidget):
         self._field.set_targets([self._start_wp, self._end_wp])
         self._field.set_paths([[self._start_wp, self._end_wp]])
 
-        self._phase = "nav"
-        self._tick_timer.start()
-
         pct = int(self._pass_idx / max(self._total_passes, 1) * 100)
         self._progress.setValue(pct)
-        self._set_status(
-            f"Pass {self._pass_idx + 1}/{self._total_passes} — "
-            f"navigating to start",
-            ACCENT)
+
+        if self._pass_idx == 0:
+            # First pass: navigate to start position
+            self._phase = "nav"
+            self._tick_timer.start()
+            self._set_status(
+                f"Pass {self._pass_idx + 1}/{self._total_passes} — "
+                f"navigating to start", ACCENT)
+        else:
+            # Return trip: robot is already at the end of the previous pass
+            # which is the start of this pass. Skip nav, run immediately.
+            pose = self._get_robot_pose()
+            self._run_start_time = time.time()
+            self._run_start_pose = pose
+            self._phase = "running"
+            self._tick_timer.start()
+            self._set_status(
+                f"Pass {self._pass_idx + 1}/{self._total_passes} — "
+                f"running at {self._test_speed:.2f} m/s", SUCCESS)
 
     def _stop_test(self):
         self._tick_timer.stop()

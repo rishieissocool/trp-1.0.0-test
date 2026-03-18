@@ -128,6 +128,7 @@ class TestPanel(QWidget):
         self._square_step = 0
         self._square_step_ticks = 0
         self._goto_target = None  # (x_mm, y_mm) for go_to_point
+        self._our_id_spin = None  # set by MainWindow — toolbar "Our Bot" spinner
 
         self._build_ui()
         self._load_robots()
@@ -714,6 +715,30 @@ class TestPanel(QWidget):
 
     # ── Command building ──────────────────────────────────────────
 
+    def set_our_bot_spin(self, spin):
+        """Give the test panel access to the toolbar's Our Bot spinner."""
+        self._our_id_spin = spin
+
+    def _get_action_rid_yellow(self):
+        """Get robot ID and team for action commands — uses toolbar/engine config."""
+        if self._our_id_spin is not None:
+            rid = self._our_id_spin.value()
+        else:
+            rid = self._id_spin.value()
+        cfg = self._engine.config if self._engine else None
+        if cfg is not None:
+            is_yellow = cfg.us_yellow
+        else:
+            is_yellow = (self._team_combo.currentText() == "Yellow")
+        return rid, is_yellow
+
+    def _build_action_cmd(self, vx=0.0, vy=0.0, w=0.0, kick=0, dribble=0):
+        """Build a RobotCommand using the toolbar's robot ID and engine team."""
+        rid, is_yellow = self._get_action_rid_yellow()
+        return RobotCommand(
+            robot_id=rid, vx=vx, vy=vy, w=w,
+            kick=kick, dribble=dribble, isYellow=is_yellow)
+
     def _build_cmd(self, vx=None, vy=None, w=None, kick=None, dribble=None):
         return RobotCommand(
             robot_id=self._id_spin.value(),
@@ -859,7 +884,7 @@ class TestPanel(QWidget):
             self._action_mode = None
             self._action_status.setText("")
             # Send a stop command
-            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            cmd = self._build_action_cmd()
             self._do_send(cmd)
 
     def _get_ball_and_robot(self):
@@ -878,8 +903,7 @@ class TestPanel(QWidget):
             return None, None
         ball_pos = (float(ball.x), float(ball.y))
 
-        rid = self._id_spin.value()
-        is_yellow = self._team_combo.currentText() == "Yellow"
+        rid, is_yellow = self._get_action_rid_yellow()
         team = frame.robots_yellow if is_yellow else frame.robots_blue
         try:
             robot = team[rid]
@@ -947,8 +971,7 @@ class TestPanel(QWidget):
         frame = wm.get_latest_frame()
         if frame is None:
             return None
-        rid = self._id_spin.value()
-        is_yellow = self._team_combo.currentText() == "Yellow"
+        rid, is_yellow = self._get_action_rid_yellow()
         team = frame.robots_yellow if is_yellow else frame.robots_blue
         try:
             robot = team[rid]
@@ -978,7 +1001,7 @@ class TestPanel(QWidget):
             if (self._action_mode == "go_to_ball_kick"
                     and self._last_ball_dist is not None
                     and self._last_ball_dist < 200):
-                cmd = self._build_cmd(vx=0.3, vy=0, w=0, kick=1, dribble=0)
+                cmd = self._build_action_cmd(vx=0.3, kick=1)
                 self._do_send(cmd)
             return
 
@@ -1018,7 +1041,7 @@ class TestPanel(QWidget):
         # Slow near walls instead of hard stop
         vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
 
-        cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
+        cmd = self._build_action_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
         self._do_send(cmd)
 
     def _tick_go_to_point(self):
@@ -1044,7 +1067,7 @@ class TestPanel(QWidget):
 
         if dist < 80:
             # Arrived — send explicit stop
-            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            cmd = self._build_action_cmd()
             self._do_send(cmd)
             self._stop_action()
             self._goto_status.setStyleSheet(
@@ -1061,7 +1084,7 @@ class TestPanel(QWidget):
         # Slow near walls
         vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
 
-        cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=0, dribble=0)
+        cmd = self._build_action_cmd(vx=vx, vy=vy, w=w)
         self._do_send(cmd)
 
     # Square waypoints — small square near center of field (500mm sides)
@@ -1080,7 +1103,7 @@ class TestPanel(QWidget):
 
         # Safety — stop if near field boundary
         if self._is_near_boundary(robot_pose):
-            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            cmd = self._build_action_cmd()
             self._do_send(cmd)
             self._stop_action()
             self._action_status.setStyleSheet(
@@ -1089,7 +1112,7 @@ class TestPanel(QWidget):
             return
 
         if self._square_step >= len(self._SQUARE_WAYPOINTS):
-            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            cmd = self._build_action_cmd()
             self._do_send(cmd)
             self._stop_action()
             self._action_status.setStyleSheet(
@@ -1105,7 +1128,7 @@ class TestPanel(QWidget):
 
         if dist < self._SQUARE_ARRIVE_DIST:
             # Stop at waypoint, then move to next
-            cmd = self._build_cmd(vx=0, vy=0, w=0, kick=0, dribble=0)
+            cmd = self._build_action_cmd()
             self._do_send(cmd)
             self._square_step += 1
             self._action_status.setText(
@@ -1119,7 +1142,7 @@ class TestPanel(QWidget):
         # Slow near walls
         vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
 
-        cmd = self._build_cmd(vx=vx, vy=vy, w=w, kick=0, dribble=0)
+        cmd = self._build_action_cmd(vx=vx, vy=vy, w=w)
         self._do_send(cmd)
 
     def _test_connection(self):

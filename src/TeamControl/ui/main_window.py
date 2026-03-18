@@ -47,12 +47,13 @@ class MainWindow(QMainWindow):
 
         # ── Pages ─────────────────────────────────────────────────
         self._test_panel = TestPanel(engine=self._engine, field=self._field)
-        self._dashboard = DashboardPage(
-            self._field, engine=self._engine, test_panel=self._test_panel)
         self._bt_panel = BehaviorTreePanel()
         self._dispatch_panel = DispatcherPanel(engine=self._engine)
         self._calibration = CalibrationPage(
             engine=self._engine, test_panel=self._test_panel)
+        self._dashboard = DashboardPage(
+            self._field, engine=self._engine, test_panel=self._test_panel,
+            calibration_page=self._calibration)
         self._settings = SettingsPage()
         self._log_panel = LogPanel()
 
@@ -89,8 +90,9 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._status_fps)
         self.setStatusBar(sb)
 
-        # Give calibration access to the "Our Bot" spinner
+        # Give calibration and test panel access to the "Our Bot" spinner
         self._calibration.set_our_bot_spin(self._our_id_spin)
+        self._test_panel.set_our_bot_spin(self._our_id_spin)
 
         # ── Wire signals ─────────────────────────────────────────
         self._wire_signals()
