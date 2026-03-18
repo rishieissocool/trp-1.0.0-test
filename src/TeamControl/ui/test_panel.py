@@ -740,37 +740,27 @@ class TestPanel(QWidget):
             kick=kick, dribble=dribble, isYellow=is_yellow)
 
     def _send_action(self, cmd: RobotCommand):
-        """Send a command for field actions — uses engine's grSim sender directly.
+        """Send a command for field actions via grSim.
 
-        This bypasses the Hardware Test tab's IP/port config, which is the
-        reason right-click actions were unreliable before.
+        Tries the engine's grSim sender first (available when engine is running),
+        then falls back to creating/reusing a grSim connection from the
+        Hardware Test tab's grSim IP/port settings.
         """
-        sent = False
-        # Primary: engine's grSim sender (always available when engine is running)
+        # Try engine's grSim sender
         if self._engine:
             try:
                 gs = getattr(self._engine, '_grsim_sender', None)
                 if gs is not None:
                     gs.send_robot_command(cmd)
-                    sent = True
+                    return
             except Exception:
                 pass
-        # Fallback: try the Hardware Test tab's grSim if checked
-        if not sent and self._grsim_also.isChecked():
-            try:
-                gs = self._get_grsim()
-                gs.send_robot_command(cmd)
-                sent = True
-            except Exception:
-                pass
-        # Last resort: direct UDP send
-        if not sent:
-            try:
-                ip = self._ip_edit.text().strip()
-                port = self._port_spin.value()
-                self._sender.send(cmd, ip, port)
-            except Exception:
-                pass
+        # Fallback: use Hardware Test tab's grSim sender (always works)
+        try:
+            gs = self._get_grsim()
+            gs.send_robot_command(cmd)
+        except Exception:
+            pass
 
     def _build_cmd(self, vx=None, vy=None, w=None, kick=None, dribble=None):
         return RobotCommand(
