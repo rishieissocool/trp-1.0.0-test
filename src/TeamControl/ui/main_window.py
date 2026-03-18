@@ -21,7 +21,6 @@ from TeamControl.ui.theme import QSS, ACCENT, TEXT, TEXT_DIM, SUCCESS, DANGER, W
 from TeamControl.ui.engine import SimEngine
 from TeamControl.ui.field_canvas import FieldCanvas
 from TeamControl.ui.dashboard_page import DashboardPage
-from TeamControl.ui.behavior_tree import BehaviorTreePanel
 from TeamControl.ui.test_panel import TestPanel
 from TeamControl.ui.settings_page import SettingsPage
 from TeamControl.ui.dispatcher_panel import DispatcherPanel
@@ -47,7 +46,6 @@ class MainWindow(QMainWindow):
 
         # ── Pages ─────────────────────────────────────────────────
         self._test_panel = TestPanel(engine=self._engine, field=self._field)
-        self._bt_panel = BehaviorTreePanel()
         self._dispatch_panel = DispatcherPanel(engine=self._engine)
         self._calibration = CalibrationPage(
             engine=self._engine, test_panel=self._test_panel)
@@ -61,12 +59,11 @@ class MainWindow(QMainWindow):
         self._tabs.setObjectName("mainTabs")
         self._tabs.setDocumentMode(True)
         self._tabs.addTab(self._dashboard, "  Dashboard  ")
-        self._tabs.addTab(self._bt_panel, "  Behavior Tree  ")
+        self._tabs.addTab(self._settings, "  Settings  ")
+        self._tabs.addTab(self._log_panel, "  Console  ")
         self._tabs.addTab(self._test_panel, "  Hardware Test  ")
         self._tabs.addTab(self._dispatch_panel, "  Dispatcher  ")
         self._tabs.addTab(self._calibration, "  Calibration  ")
-        self._tabs.addTab(self._settings, "  Settings  ")
-        self._tabs.addTab(self._log_panel, "  Console  ")
         self.setCentralWidget(self._tabs)
 
         # ── Toolbar ──────────────────────────────────────────────
@@ -200,9 +197,9 @@ class MainWindow(QMainWindow):
         view_menu = mb.addMenu("View")
         view_menu.addAction("Reset Field View", self._reset_field_view)
         view_menu.addSeparator()
-        for i, name in enumerate(["Dashboard", "Behavior Tree",
+        for i, name in enumerate(["Dashboard", "Settings", "Console",
                                    "Hardware Test", "Dispatcher",
-                                   "Calibration", "Settings", "Console"]):
+                                   "Calibration"]):
             view_menu.addAction(
                 name, lambda checked=False, idx=i: self._tabs.setCurrentIndex(idx))
 

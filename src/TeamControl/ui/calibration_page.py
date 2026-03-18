@@ -166,8 +166,16 @@ class CalibrationPage(QWidget):
         self._test_speed = 0.0
         self._line_y = 0.0          # ideal Y for drift measurement
 
+        self._ideal_heading = 0.0   # heading to hold during runs
+
         # Collected data for current auto-cal session
         self._run_results = []      # list of dicts per pass
+
+        # Speed sweep state
+        self._sweep_mode = False
+        self._sweep_speeds = []     # list of speeds to test
+        self._sweep_idx = 0         # current speed index
+        self._sweep_results = {}    # speed -> list of run results
 
     # ══════════════════════════════════════════════════════════════
     #  Public API
@@ -248,13 +256,25 @@ class CalibrationPage(QWidget):
 
         lay.addLayout(btn_row)
 
-        # Run single pass button
-        self._single_btn = QPushButton("Run Single Pass")
+        btn_row2 = QHBoxLayout()
+
+        self._single_btn = QPushButton("Single Pass")
         self._single_btn.setStyleSheet(
             f"background:{BG_CARD}; color:{TEXT}; padding:6px 12px; "
             f"border:1px solid {BORDER}; border-radius:4px;")
         self._single_btn.clicked.connect(self._start_single)
-        lay.addWidget(self._single_btn)
+        btn_row2.addWidget(self._single_btn)
+
+        self._sweep_btn = QPushButton("Speed Sweep")
+        self._sweep_btn.setToolTip(
+            "Test multiple speeds to find the fastest accurate one")
+        self._sweep_btn.setStyleSheet(
+            f"background:{BG_CARD}; color:{TEXT}; padding:6px 12px; "
+            f"border:1px solid {BORDER}; border-radius:4px;")
+        self._sweep_btn.clicked.connect(self._start_sweep)
+        btn_row2.addWidget(self._sweep_btn)
+
+        lay.addLayout(btn_row2)
 
         parent_lay.addWidget(card)
 
@@ -451,6 +471,7 @@ class CalibrationPage(QWidget):
             self._set_status("No robot — is engine running?", DANGER)
             return
 
+        self._sweep_mode = False
         self._test_speed = self._speed_spin.value()
         self._total_passes = self._passes_spin.value()
         self._pass_idx = 0
@@ -461,6 +482,39 @@ class CalibrationPage(QWidget):
         self._set_status("Auto calibrating...", ACCENT)
         self._begin_pass()
 
+    def _start_sweep(self):
+        """Test multiple speeds to find the fastest accurate one."""
+        pose = self._get_robot_pose()
+        if pose is None:
+            self._set_status("No robot — is engine running?", DANGER)
+            return
+
+        self._sweep_mode = True
+        self._sweep_speeds = [0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75]
+        self._sweep_idx = 0
+        self._sweep_results = {}
+        self._line_y = pose[1]
+        self._direction = 1
+
+        self._log.appendPlainText(
+            f"Speed sweep: testing {len(self._sweep_speeds)} speeds "
+            f"({self._sweep_speeds[0]:.2f} - {self._sweep_speeds[-1]:.2f} m/s)")
+
+        self._start_sweep_speed()
+
+    def _start_sweep_speed(self):
+        """Begin passes at the current sweep speed."""
+        speed = self._sweep_speeds[self._sweep_idx]
+        self._test_speed = speed
+        self._total_passes = 2  # 2 passes per speed (1 back + forth)
+        self._pass_idx = 0
+        self._run_results = []
+
+        self._set_status(
+            f"Sweep: testing {speed:.2f} m/s "
+            f"({self._sweep_idx + 1}/{len(self._sweep_speeds)})", ACCENT)
+        self._begin_pass()
+
     def _start_single(self):
         """Run a single pass for quick testing."""
         pose = self._get_robot_pose()
@@ -468,6 +522,7 @@ class CalibrationPage(QWidget):
             self._set_status("No robot — is engine running?", DANGER)
             return
 
+        self._sweep_mode = False
         self._test_speed = self._speed_spin.value()
         self._total_passes = 1
         self._pass_idx = 0
@@ -487,9 +542,11 @@ class CalibrationPage(QWidget):
         if self._direction == 1:
             self._start_wp = (left_x, y)
             self._end_wp = (right_x, y)
+            self._ideal_heading = 0.0      # face right (+X)
         else:
             self._start_wp = (right_x, y)
             self._end_wp = (left_x, y)
+            self._ideal_heading = math.pi  # face left (-X)
 
         # Show waypoints on field
         self._field.set_targets([self._start_wp, self._end_wp])
@@ -570,10 +627,9 @@ class CalibrationPage(QWidget):
         self._send_cmd(vx=vx, vy=vy, w=w)
 
     def _tick_running(self, pose):
-        """Drive toward end waypoint at test speed, correcting lateral drift."""
+        """Drive toward end waypoint at test speed with heading-hold."""
         rel = world2robot(pose, self._end_wp)
         dist = math.hypot(rel[0], rel[1])
-        angle = math.atan2(rel[1], rel[0])
 
         if dist < _ARRIVE:
             # Reached end — stop and settle
@@ -587,21 +643,27 @@ class CalibrationPage(QWidget):
                 WARNING)
             return
 
-        # Drive at test speed toward end waypoint
-        # Main axis: vx toward target
-        # Correction: vy to stay on the ideal Y line
-        vx, vy = move_toward(rel, self._test_speed,
-                             ramp_dist=400, stop_dist=50)
+        # Speed ramp near endpoints
+        speed = self._test_speed
+        if dist < 400:
+            speed = max(speed * (dist / 400.0), 0.08)
 
-        # Lateral correction — nudge back toward ideal Y
-        y_error = pose[1] - self._line_y
-        vy_correction = -y_error * 0.0005
-        # Transform correction to robot frame
-        heading = pose[2]
-        vy += vy_correction * math.cos(heading)
+        # Drive forward in robot frame (vx = forward speed)
+        vx = speed
 
-        # Face forward along the run direction
-        w = clamp(angle * _TURN_GAIN, -MAX_W, MAX_W)
+        # Lateral correction — push back toward ideal Y line
+        # Compute lateral offset in robot frame
+        lat_target = (pose[0], self._line_y)
+        rel_lat = world2robot(pose, lat_target)
+        # rel_lat[1] is the lateral error in robot frame
+        vy = clamp(rel_lat[1] * 0.003, -0.15, 0.15)
+
+        # Heading-hold — keep the ideal heading, don't chase the target
+        heading_error = self._ideal_heading - pose[2]
+        # Normalize to [-pi, pi]
+        heading_error = math.atan2(math.sin(heading_error),
+                                   math.cos(heading_error))
+        w = clamp(heading_error * 1.5, -MAX_W, MAX_W)
 
         # Wall brake for safety
         vx, vy = wall_brake(pose[0], pose[1], vx, vy)
@@ -688,32 +750,50 @@ class CalibrationPage(QWidget):
 
     def _finish_auto(self):
         """All passes done — compute calibration values from results."""
+        if not self._run_results:
+            self._set_status("No results collected", WARNING)
+            return
+
+        # If in sweep mode, save results for this speed and move to next
+        if self._sweep_mode:
+            speed = self._sweep_speeds[self._sweep_idx]
+            self._sweep_results[speed] = list(self._run_results)
+
+            avg_ratio = sum(r["speed_ratio"] for r in self._run_results) / len(self._run_results)
+            avg_drift = sum(r["drift_per_m"] for r in self._run_results) / len(self._run_results)
+            self._log.appendPlainText(
+                f"  {speed:.2f} m/s: ratio={avg_ratio:.3f} drift={avg_drift:.1f} mm/m")
+
+            self._sweep_idx += 1
+            if self._sweep_idx < len(self._sweep_speeds):
+                pct = int(self._sweep_idx / len(self._sweep_speeds) * 100)
+                self._progress.setValue(pct)
+                self._start_sweep_speed()
+                return
+
+            # All speeds tested — pick the best
+            self._finish_sweep()
+            return
+
+        # Normal (non-sweep) finish
         self._tick_timer.stop()
         self._field.set_targets([])
         self._field.set_paths([])
         self._progress.setValue(100)
 
-        if not self._run_results:
-            self._set_status("No results collected", WARNING)
-            return
-
-        # Average the metrics
         n = len(self._run_results)
         avg_ratio = sum(r["speed_ratio"] for r in self._run_results) / n
         avg_drift = sum(r["drift_per_m"] for r in self._run_results) / n
         avg_overshoot = sum(r["overshoot_mm"] for r in self._run_results) / n
 
-        # Update calibration
         self._cal["speed_scale"] = round(avg_ratio, 4)
         self._cal["lateral_drift_per_m"] = round(avg_drift, 2)
         self._cal["stop_overshoot_mm"] = round(avg_overshoot, 1)
 
-        # Append runs to history
         if "runs" not in self._cal:
             self._cal["runs"] = []
         self._cal["runs"].extend(self._run_results)
 
-        # Save automatically
         self._save_cal()
         self._refresh_values()
 
@@ -726,6 +806,67 @@ class CalibrationPage(QWidget):
 
         self._set_status(
             f"Done! Speed scale = {avg_ratio:.4f}", SUCCESS)
+
+    def _finish_sweep(self):
+        """All sweep speeds tested — pick the fastest accurate speed."""
+        self._tick_timer.stop()
+        self._field.set_targets([])
+        self._field.set_paths([])
+        self._progress.setValue(100)
+
+        # Find the fastest speed with good accuracy (ratio close to 1.0)
+        # and low drift
+        best_speed = None
+        best_ratio = 1.0
+        all_runs = []
+
+        self._log.appendPlainText("--- Speed Sweep Results ---")
+        for speed in self._sweep_speeds:
+            results = self._sweep_results.get(speed, [])
+            if not results:
+                continue
+            all_runs.extend(results)
+            avg_ratio = sum(r["speed_ratio"] for r in results) / len(results)
+            avg_drift = sum(r["drift_per_m"] for r in results) / len(results)
+
+            # Acceptable if ratio is within 20% and drift is under 30 mm/m
+            accurate = 0.80 < avg_ratio < 1.20 and avg_drift < 30
+            marker = " <-- BEST" if accurate else ""
+            self._log.appendPlainText(
+                f"  {speed:.2f} m/s: ratio={avg_ratio:.3f} "
+                f"drift={avg_drift:.1f} mm/m"
+                f"{'  OK' if accurate else '  POOR'}{marker}")
+
+            if accurate:
+                best_speed = speed
+                best_ratio = avg_ratio
+
+        if best_speed is not None:
+            self._cal["speed_scale"] = round(best_ratio, 4)
+            self._cal["optimal_speed"] = best_speed
+            self._speed_spin.setValue(best_speed)
+            self._log.appendPlainText(
+                f"\nOptimal speed: {best_speed:.2f} m/s "
+                f"(scale={best_ratio:.4f})")
+            self._set_status(
+                f"Sweep done! Best: {best_speed:.2f} m/s", SUCCESS)
+        else:
+            self._log.appendPlainText("\nNo speed passed accuracy threshold")
+            self._set_status("Sweep done — no accurate speed found", WARNING)
+
+        # Compute averages from all runs
+        if all_runs:
+            n = len(all_runs)
+            self._cal["lateral_drift_per_m"] = round(
+                sum(r["drift_per_m"] for r in all_runs) / n, 2)
+            self._cal["stop_overshoot_mm"] = round(
+                sum(r["overshoot_mm"] for r in all_runs) / n, 1)
+            if "runs" not in self._cal:
+                self._cal["runs"] = []
+            self._cal["runs"].extend(all_runs)
+
+        self._save_cal()
+        self._refresh_values()
 
     # ══════════════════════════════════════════════════════════════
     #  Apply / Reset
