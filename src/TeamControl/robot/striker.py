@@ -175,7 +175,8 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         # ═════════════════════════════════════════════════════
         elif d_ball < KICK_RANGE and (rel_ball[0] > 0 or not ball_visible):
             dribble = 1
-            vx, vy = move_toward(rel_ball, DRIBBLE_SPD * 0.4, ramp_dist=120,
+            # Drive into ball with dribbler — push forward with front
+            vx, vy = move_toward(rel_ball, DRIBBLE_SPD, ramp_dist=150,
                                  stop_dist=10)
             committed_side = None
 
@@ -236,11 +237,18 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
             if is_behind and d_nav < 200 and d_ball < BALL_NEAR:
-                # Lined up — gentle approach to ball
+                # Lined up — drive straight at ball with dribbler
                 dribble = 1
                 vx, vy = move_toward(rel_ball, DRIBBLE_SPD, ramp_dist=350,
                                      stop_dist=10)
                 w = clamp(ang_aim * TURN_GAIN * 0.7, -MAX_W, MAX_W)
+            elif d_ball < BALL_NEAR and rel_ball[0] > 0:
+                # Close and ball is in front — dribble in head-on
+                dribble = 1
+                vx, vy = move_toward(rel_ball, DRIBBLE_SPD, ramp_dist=300,
+                                     stop_dist=10)
+                # Face the aim (goal) so front/kicker is oriented correctly
+                w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
             else:
                 # Navigate toward arc waypoint or behind-ball point
                 vx, vy = move_toward(rel_nav, APPROACH_SPD, ramp_dist=400,
