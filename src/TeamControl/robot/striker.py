@@ -69,6 +69,8 @@ def _pick_aim(ball, goal_x, frame, is_yellow):
 
 # ── Main loop ─────────────────────────────────────────────────────
 
+BALL_MEMORY_TIME = 0.5    # seconds to trust last-known ball when occluded
+
 def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     last_kick = 0.0
     frame = None
@@ -76,6 +78,9 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     committed_side = None
     dwell_start = 0.0       # when alignment started
     aligned = False         # True while continuously aligned
+    last_ball = None         # last known ball (x, y)
+    last_ball_time = 0.0     # when ball was last seen
+    last_d_ball = float('inf')  # distance to ball when last seen
 
     while is_running.is_set():
         now = time.time()
@@ -90,7 +95,7 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                 pass
             last_ft = now
 
-        if frame is None or frame.ball is None:
+        if frame is None:
             time.sleep(LOOP_RATE)
             continue
 
@@ -105,9 +110,23 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             continue
 
         rp = robot.position
-        bp = frame.ball.position
-        ball = (float(bp[0]), float(bp[1]))
         rpos = (float(rp[0]), float(rp[1]), float(rp[2]))
+
+        # ── Resolve ball position (use memory if occluded) ───
+        ball_visible = frame.ball is not None
+        if ball_visible:
+            bp = frame.ball.position
+            ball = (float(bp[0]), float(bp[1]))
+            last_ball = ball
+            last_ball_time = now
+        elif last_ball is not None and \
+             (now - last_ball_time) < BALL_MEMORY_TIME and \
+             last_d_ball < BALL_NEAR:
+            # Ball disappeared while close — likely occluded by us
+            ball = last_ball
+        else:
+            time.sleep(LOOP_RATE)
+            continue
 
         try:
             us_positive = wm.us_positive()
@@ -126,6 +145,8 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         rel_ball = world2robot(rpos, ball)
         d_ball = math.hypot(rel_ball[0], rel_ball[1])
         ang_ball = math.atan2(rel_ball[1], rel_ball[0])
+        if ball_visible:
+            last_d_ball = d_ball
 
         aim = _pick_aim(ball, goal_x, frame, is_yellow)
         rel_aim = world2robot(rpos, aim)
@@ -152,7 +173,7 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         # ═════════════════════════════════════════════════════
         #  2. KICK — ball close and in front, align and shoot
         # ═════════════════════════════════════════════════════
-        elif d_ball < KICK_RANGE and rel_ball[0] > 0:
+        elif d_ball < KICK_RANGE and (rel_ball[0] > 0 or not ball_visible):
             dribble = 1
             vx, vy = move_toward(rel_ball, DRIBBLE_SPD * 0.4, ramp_dist=120,
                                  stop_dist=10)
@@ -161,27 +182,36 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             # Rotate toward aim target
             w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
 
-            # Kick when aligned to goal AND held stable for DWELL_TIME
-            dx_goal = abs(goal_x - ball[0])
-            kick_tol = clamp(
-                math.atan2(GOAL_WIDTH * 0.35, max(dx_goal, 350)),
-                0.08, 0.35)
-
-            if abs(ang_aim) < KICK_ALIGN_TOL:
-                if not aligned:
-                    aligned = True
-                    dwell_start = now
-                elif (now - dwell_start) >= DWELL_TIME and \
-                     abs(ang_aim) < kick_tol and \
-                     (now - last_kick) > KICK_COOLDOWN:
-                    kick = 1
-                    dribble = 0
-                    vx = DRIBBLE_SPD
-                    vy = 0.0
-                    last_kick = now
-                    aligned = False
-            else:
+            # Ball occluded while very close — kick immediately
+            if not ball_visible and (now - last_kick) > KICK_COOLDOWN:
+                kick = 1
+                dribble = 0
+                vx = DRIBBLE_SPD
+                vy = 0.0
+                last_kick = now
                 aligned = False
+            else:
+                # Kick when aligned to goal AND held stable for DWELL_TIME
+                dx_goal = abs(goal_x - ball[0])
+                kick_tol = clamp(
+                    math.atan2(GOAL_WIDTH * 0.35, max(dx_goal, 350)),
+                    0.08, 0.35)
+
+                if abs(ang_aim) < KICK_ALIGN_TOL:
+                    if not aligned:
+                        aligned = True
+                        dwell_start = now
+                    elif (now - dwell_start) >= DWELL_TIME and \
+                         abs(ang_aim) < kick_tol and \
+                         (now - last_kick) > KICK_COOLDOWN:
+                        kick = 1
+                        dribble = 0
+                        vx = DRIBBLE_SPD
+                        vy = 0.0
+                        last_kick = now
+                        aligned = False
+                else:
+                    aligned = False
 
         # ═════════════════════════════════════════════════════
         #  3. APPROACH — arc around ball, get behind, drive in

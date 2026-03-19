@@ -170,7 +170,7 @@ class Dispatcher(BaseWorker):
 
         key = (shell_id, isYellow)
         last = self._last_sent_per_robot.get(key, 0)
-        if last + 0.01 < now:
+        if last + 0.05 < now:
             self.r_sender.send(command,robot_dict["ip"],robot_dict["port"])
             self._last_sent_per_robot[key] = now
             self._send_counts[key] = self._send_counts.get(key, 0) + 1
