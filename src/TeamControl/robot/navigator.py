@@ -33,12 +33,11 @@ AVOID_STRENGTH = 2.5      # peak avoidance magnitude
 AVOID_CRITICAL = 260      # very close → max strength
 
 # Smoothing: 0 = no smoothing (instant), 1 = never changes.
-# 0.55 gives a nice gentle blend across frames at 60 Hz.
-SMOOTH_ALPHA = 0.55
+SMOOTH_ALPHA = 0.3
 
 # Tangential vs repulsive balance.
-# Higher = more curving around, less pushing away = smoother paths.
-TANGENT_RATIO = 1.2
+# Low = mostly push straight away from obstacle, minimal curving.
+TANGENT_RATIO = 0.3
 
 # ── Ball-chase speed ─────────────────────────────────────────────
 CHASE_SPEED = CRUISE_SPEED * 0.85   # smooth, moderate pace

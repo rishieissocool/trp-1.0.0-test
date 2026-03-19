@@ -636,48 +636,72 @@ class CalibrationPage(QWidget):
         self._send_cmd(vx=vx, vy=vy, w=w)
 
     def _tick_running(self, pose):
-        """Drive toward end waypoint at test speed with heading-hold."""
-        rel = world2robot(pose, self._end_wp)
-        dist = math.hypot(rel[0], rel[1])
+        """Drive toward end waypoint while rotating, staying perfectly on-line.
+
+        The robot can turn freely without curving off the path because:
+          1. Velocity is computed in WORLD frame (toward waypoint + lateral fix)
+          2. Transformed to ROBOT frame using the current heading
+          3. Rotation compensation pre-rotates the robot-frame velocity to
+             cancel the drift caused by rotating during the timestep
+        """
+        dx = self._end_wp[0] - pose[0]
+        dy = self._end_wp[1] - pose[1]
+        dist = math.hypot(dx, dy)
 
         if dist < _ARRIVE:
-            # Reached end — stop and settle
             self._send_stop()
             self._phase = "settling"
             self._tick_timer.stop()
             self._settle_timer.start(_SETTLE_MS)
             self._set_status(
                 f"Pass {self._pass_idx + 1}/{self._total_passes} — "
-                f"settling...",
-                WARNING)
+                f"settling...", WARNING)
             return
 
-        # Speed ramp near endpoints
+        # ── 1. World-frame velocity toward target ───────────────
         speed = self._test_speed
         if dist < 400:
             speed = max(speed * (dist / 400.0), 0.08)
 
-        # Drive forward in robot frame (vx = forward speed)
-        vx = speed
+        ux, uy = dx / dist, dy / dist          # unit direction to target
+        vx_w = ux * speed
+        vy_w = uy * speed
 
-        # Lateral correction — push back toward ideal Y line
-        # Compute lateral offset in robot frame
-        lat_target = (pose[0], self._line_y)
-        rel_lat = world2robot(pose, lat_target)
-        # rel_lat[1] is the lateral error in robot frame
-        vy = clamp(rel_lat[1] * 0.003, -0.15, 0.15)
+        # ── 2. Lateral correction — stay on ideal Y line ────────
+        #    Proportional push back toward the line, clamped so it
+        #    never overpower the forward drive.
+        y_err = pose[1] - self._line_y              # +  means above line
+        lat_fix = clamp(y_err * 0.001, -0.12, 0.12)
+        vy_w -= lat_fix                             # push toward line
 
-        # Heading-hold — keep the ideal heading, don't chase the target
-        heading_error = self._ideal_heading - pose[2]
-        # Normalize to [-pi, pi]
-        heading_error = math.atan2(math.sin(heading_error),
-                                   math.cos(heading_error))
-        w = clamp(heading_error * 1.5, -MAX_W, MAX_W)
+        # ── 3. Heading controller — face direction of travel ────
+        h_err = self._ideal_heading - pose[2]
+        h_err = math.atan2(math.sin(h_err), math.cos(h_err))
+        w = clamp(h_err * 1.5, -MAX_W, MAX_W)
 
-        # Wall brake for safety
-        vx, vy = wall_brake(pose[0], pose[1], vx, vy)
+        # ── 4. World → Robot frame transform ────────────────────
+        #    The robot is omnidirectional so we just rotate the
+        #    world-frame velocity vector by -θ (robot heading).
+        theta = pose[2]
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        vx_r =  vx_w * cos_t + vy_w * sin_t
+        vy_r = -vx_w * sin_t + vy_w * cos_t
 
-        self._send_cmd(vx=vx, vy=vy, w=w)
+        # ── 5. Rotation compensation ────────────────────────────
+        #    While the robot rotates by w*dt during this tick, the
+        #    robot frame rotates with it, skewing the velocity direction.
+        #    Pre-rotate by -w*dt/2 (midpoint method) to cancel this.
+        dt = 0.05                                   # 20 Hz tick
+        if abs(w) > 0.01:
+            half = -w * dt * 0.5
+            c, s = math.cos(half), math.sin(half)
+            vx_r, vy_r = vx_r * c - vy_r * s, vx_r * s + vy_r * c
+
+        # ── 6. Wall brake ───────────────────────────────────────
+        vx_r, vy_r = wall_brake(pose[0], pose[1], vx_r, vy_r)
+
+        self._send_cmd(vx=vx_r, vy=vy_r, w=w)
 
     def _on_settle(self):
         """Called after settle timer — measure final position and record."""
