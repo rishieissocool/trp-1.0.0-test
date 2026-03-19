@@ -243,12 +243,12 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                                      stop_dist=10)
                 w = clamp(ang_aim * TURN_GAIN * 0.7, -MAX_W, MAX_W)
             elif d_ball < BALL_NEAR and rel_ball[0] > 0:
-                # Close and ball is in front — dribble in head-on
+                # Close and ball is in front — face ball, dribble in head-on
                 dribble = 1
                 vx, vy = move_toward(rel_ball, DRIBBLE_SPD, ramp_dist=300,
                                      stop_dist=10)
-                # Face the aim (goal) so front/kicker is oriented correctly
-                w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
+                # Face the ball so front/kicker hits it head-on
+                w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
             else:
                 # Navigate toward arc waypoint or behind-ball point
                 vx, vy = move_toward(rel_nav, APPROACH_SPD, ramp_dist=400,
