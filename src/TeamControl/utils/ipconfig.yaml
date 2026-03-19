@@ -22,7 +22,7 @@ yellow:
     has_chip_kick: false
 
   D:
-    ip: "172.20.10.5"
+    ip: "192.168.1.4"
     port: 50514
     grSimID : 3
     shellID : 3 
@@ -46,14 +46,14 @@ yellow:
 blue:
 
   A:
-    ip: "172.20.10.5"
+    ip: "192.168.1.4"
     port: 12345
     grSimID : 0
     shellID : 0
     has_chip_kick: false
 
   B:
-    ip: "127.0.0.1"
+    ip: "192.168.1.4"
     port: 50514
     grSimID : 1
     shellID : 1
@@ -101,10 +101,10 @@ gc:
   port: 10003 
 
 network:
-  robot_ip: "172.20.10.8"
+  robot_ip: "192.168.1.2"
   vision_ip: "192.168.1.2"
 
 use_grSim_vision: false
-us_yellow: true
+us_yellow: false
 us_positive: us_yellow
 send_to_grSim: false
