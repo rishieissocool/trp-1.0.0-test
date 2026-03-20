@@ -83,7 +83,7 @@ class CalculateGoalieAction(py_trees.behaviour.Behaviour):
         ball = (float(ball_pos[0]), float(ball_pos[1]))
         now = time.time()
 
-        sign = -1 if is_positive else 1
+        sign = 1 if is_positive else -1
         goal_x = sign * (FIELD_LENGTH / 2 - GOAL_LINE_OFFSET)
         goal_back_x = sign * (FIELD_LENGTH / 2)
         half_goal = GOAL_HW
