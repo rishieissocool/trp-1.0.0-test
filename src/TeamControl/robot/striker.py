@@ -31,10 +31,10 @@ APPROACH_SPD   = CRUISE_SPEED        # fast approach
 DRIBBLE_SPD    = DRIBBLE_SPEED      # gentle when close
 WAIT_SPD       = CRUISE_SPEED * 0.6 # repositioning outside box
 DWELL_TIME     = 0.08               # seconds ball must be stable before kick
-KICK_ALIGN_TOL = 0.35               # rad — alignment tolerance for dwell
+KICK_ALIGN_TOL = 0.18               # rad — alignment tolerance for dwell
 FORCE_KICK_TIME = 0.6               # if near ball this long, just kick
-SHOOT_RANGE    = 600                # mm — take a shot from this far if aimed
-SHOOT_ALIGN    = 0.30               # rad — alignment needed for distance shot
+SHOOT_RANGE    = 350                # mm — take a shot from this far if aimed
+SHOOT_ALIGN    = 0.18               # rad — alignment needed for distance shot
 
 
 def _in_penalty_box(px, py, goal_x):
