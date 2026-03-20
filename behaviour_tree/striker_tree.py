@@ -28,12 +28,13 @@ ONETOUCH_SPEED = 1.8
 
 BEHIND_MM = 150
 CLOSE_TO_BEHIND_MM = 250
-KICK_MM = 170
-ALIGN_RAD = 0.55
-KICK_COOLDOWN_S = 0.22
+KICK_MM = 210
+ALIGN_RAD = 0.70
+KICK_COOLDOWN_S = 0.18
 STOP_RADIUS = 35
 RAMP_DIST = 350
 MIN_CHARGE_VX = 0.4
+FORCE_KICK_TIME = 0.6    # if near ball this long without kicking, just fire
 
 # Ball velocity
 BALL_HISTORY_SIZE = 6
@@ -69,6 +70,7 @@ class CalculateStrikerAction(py_trees.behaviour.Behaviour):
         self.last_kick_time = 0.0
         self.ball_history = []
         self.last_ball_xy = None
+        self.near_ball_since = 0.0   # when we first got close to ball
 
     def setup(self, **kwargs):
         self.bb.register_key(key="robot_pos", access=py_trees.common.Access.READ)
@@ -212,15 +214,24 @@ class CalculateStrikerAction(py_trees.behaviour.Behaviour):
                 vx = MIN_CHARGE_VX
             w = turn_toward(rel_aim, epsilon=0.05, max_w=MAX_W)
 
-            if (
-                d_ball < KICK_MM
-                and rel_ball[0] > -40
-                and abs(angle_to_aim) < ALIGN_RAD
-                and (now - self.last_kick_time) > KICK_COOLDOWN_S
+            # Track how long we've been near the ball
+            if d_ball < KICK_MM * 1.5:
+                if self.near_ball_since == 0.0:
+                    self.near_ball_since = now
+            else:
+                self.near_ball_since = 0.0
+
+            near_ball_duration = (now - self.near_ball_since) if self.near_ball_since > 0 else 0.0
+            force_kick = near_ball_duration > FORCE_KICK_TIME
+
+            if (now - self.last_kick_time) > KICK_COOLDOWN_S and (
+                (d_ball < KICK_MM and rel_ball[0] > -40 and abs(angle_to_aim) < ALIGN_RAD)
+                or force_kick
             ):
                 kick = 1
                 dribble = 0
                 self.last_kick_time = now
+                self.near_ball_since = 0.0
                 vx = CHARGE_SPEED
                 vy = 0.0
 

@@ -30,8 +30,9 @@ from TeamControl.robot.constants import (
 APPROACH_SPD   = CHARGE_SPEED       # moderate approach
 DRIBBLE_SPD    = DRIBBLE_SPEED      # gentle when close
 WAIT_SPD       = CRUISE_SPEED * 0.6 # repositioning outside box
-DWELL_TIME     = 0.15               # seconds ball must be stable before kick
-KICK_ALIGN_TOL = 0.20               # rad — alignment tolerance for dwell
+DWELL_TIME     = 0.08               # seconds ball must be stable before kick
+KICK_ALIGN_TOL = 0.35               # rad — alignment tolerance for dwell
+FORCE_KICK_TIME = 0.6               # if near ball this long, just kick
 
 
 def _in_penalty_box(px, py, goal_x):
@@ -81,6 +82,7 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     last_ball = None         # last known ball (x, y)
     last_ball_time = 0.0     # when ball was last seen
     last_d_ball = float('inf')  # distance to ball when last seen
+    near_ball_since = 0.0    # when we first got close to ball
 
     while is_running.is_set():
         now = time.time()
@@ -169,6 +171,7 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             vx, vy = move_toward(rel_w, WAIT_SPD)
             w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
             committed_side = None
+            near_ball_since = 0.0
 
         # ═════════════════════════════════════════════════════
         #  2. KICK — ball close and in front, align and shoot
@@ -183,6 +186,12 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             # Rotate toward aim target
             w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
 
+            # Track how long we've been near the ball
+            if near_ball_since == 0.0:
+                near_ball_since = now
+            near_ball_duration = now - near_ball_since
+            force_kick = near_ball_duration > FORCE_KICK_TIME
+
             # Ball occluded while very close — kick immediately
             if not ball_visible and (now - last_kick) > KICK_COOLDOWN:
                 kick = 1
@@ -190,34 +199,25 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                 vx = DRIBBLE_SPD
                 vy = 0.0
                 last_kick = now
+                near_ball_since = 0.0
                 aligned = False
-            else:
-                # Kick when aligned to goal AND held stable for DWELL_TIME
-                dx_goal = abs(goal_x - ball[0])
-                kick_tol = clamp(
-                    math.atan2(GOAL_WIDTH * 0.35, max(dx_goal, 350)),
-                    0.08, 0.35)
-
-                if abs(ang_aim) < KICK_ALIGN_TOL:
-                    if not aligned:
-                        aligned = True
-                        dwell_start = now
-                    elif (now - dwell_start) >= DWELL_TIME and \
-                         abs(ang_aim) < kick_tol and \
-                         (now - last_kick) > KICK_COOLDOWN:
-                        kick = 1
-                        dribble = 0
-                        vx = DRIBBLE_SPD
-                        vy = 0.0
-                        last_kick = now
-                        aligned = False
-                else:
-                    aligned = False
+            elif (now - last_kick) > KICK_COOLDOWN and (
+                (abs(ang_aim) < KICK_ALIGN_TOL) or force_kick
+            ):
+                # Kick when roughly aligned OR forced after timeout
+                kick = 1
+                dribble = 0
+                vx = DRIBBLE_SPD
+                vy = 0.0
+                last_kick = now
+                near_ball_since = 0.0
+                aligned = False
 
         # ═════════════════════════════════════════════════════
         #  3. APPROACH — arc around ball, get behind, drive in
         # ═════════════════════════════════════════════════════
         else:
+            near_ball_since = 0.0
             nav, committed_side, is_behind = compute_arc_nav(
                 robot_xy=(rpos[0], rpos[1]),
                 ball=ball,
