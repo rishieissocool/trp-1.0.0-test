@@ -18,6 +18,7 @@ from TeamControl.robot.goalie import run_goalie
 from TeamControl.robot.striker import run_striker
 from TeamControl.robot.navigator import run_navigator, WAYPOINTS_A, WAYPOINTS_B
 from TeamControl.robot.team import run_team
+from TeamControl.robot.coop import run_coop
 
 
 def main():
@@ -26,12 +27,13 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["goalie", "1v1", "obstacle", "6v6"],
+        choices=["goalie", "1v1", "obstacle", "coop", "6v6"],
         default="goalie",
         help=(
             "goalie   — yellow goalie vs blue striker (default)\n"
             "1v1      — yellow striker vs blue striker\n"
-            "obstacle — two yellow robots patrolling with obstacle avoidance\n"
+            "obstacle — two robots chasing ball with obstacle avoidance\n"
+            "coop     — two robots cooperate to score (pass + shoot)\n"
             "6v6      — full 6v6 match (1 goalie + 5 field per team)"
         ),
     )
@@ -93,15 +95,26 @@ def main():
                           0, False)))
 
     elif args.mode == "obstacle":
-        # Two yellow robots patrolling separate waypoint loops
+        # Two robots chasing ball with obstacle avoidance
         foreground.append(
             Process(target=run_navigator,
                     args=(is_running, dispatch_q, wm,
-                          0, True, WAYPOINTS_A)))
+                          0, preset.us_yellow, WAYPOINTS_A)))
         foreground.append(
             Process(target=run_navigator,
                     args=(is_running, dispatch_q, wm,
-                          1, True, WAYPOINTS_B)))
+                          1, preset.us_yellow, WAYPOINTS_B)))
+
+    elif args.mode == "coop":
+        # Two robots cooperate to score
+        foreground.append(
+            Process(target=run_coop,
+                    args=(is_running, dispatch_q, wm,
+                          0, 1, preset.us_yellow)))
+        foreground.append(
+            Process(target=run_coop,
+                    args=(is_running, dispatch_q, wm,
+                          1, 0, preset.us_yellow)))
 
     elif args.mode == "6v6":
         # Full match: one coordinator per team, goalie = robot 0

@@ -23,6 +23,7 @@ from TeamControl.robot.goalie import run_goalie
 from TeamControl.robot.striker import run_striker
 from TeamControl.robot.navigator import run_navigator, WAYPOINTS_A, WAYPOINTS_B
 from TeamControl.robot.team import run_team
+from TeamControl.robot.coop import run_coop
 
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
@@ -72,7 +73,7 @@ class SimEngine(QObject):
     engine_stopped = Signal()
     log_message = Signal(str)            # log line
 
-    MODES = ["vision_only", "goalie", "1v1", "obstacle", "6v6"]
+    MODES = ["vision_only", "goalie", "1v1", "obstacle", "coop", "6v6"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -265,10 +266,21 @@ class SimEngine(QObject):
                                  daemon=True))
         elif mode == "obstacle":
             procs.append(Process(target=run_navigator,
-                                 args=(ev, dq, wm, our_id, True, WAYPOINTS_A),
+                                 args=(ev, dq, wm, our_id,
+                                       preset.us_yellow, WAYPOINTS_A),
                                  daemon=True))
             procs.append(Process(target=run_navigator,
-                                 args=(ev, dq, wm, opp_id, True, WAYPOINTS_B),
+                                 args=(ev, dq, wm, opp_id,
+                                       preset.us_yellow, WAYPOINTS_B),
+                                 daemon=True))
+        elif mode == "coop":
+            procs.append(Process(target=run_coop,
+                                 args=(ev, dq, wm, our_id, opp_id,
+                                       preset.us_yellow),
+                                 daemon=True))
+            procs.append(Process(target=run_coop,
+                                 args=(ev, dq, wm, opp_id, our_id,
+                                       preset.us_yellow),
                                  daemon=True))
         elif mode == "6v6":
             procs.append(Process(target=run_team,
