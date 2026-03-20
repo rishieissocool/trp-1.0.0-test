@@ -87,7 +87,7 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
         ball = (float(bp[0]), float(bp[1]))
         rpos = (float(rp[0]), float(rp[1]), float(rp[2]))
 
-        sign = 1 if is_positive else -1
+        sign = -1 if is_positive else 1
         goal_x = sign * (FIELD_LENGTH / 2)
 
         # ── Ball velocity ────────────────────────────────────
