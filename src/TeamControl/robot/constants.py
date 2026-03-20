@@ -137,4 +137,4 @@ INTERCEPT_STEPS   = 12       # number of prediction steps
 
 LOOP_RATE         = 0.016    # ~60 Hz main loop sleep
 FRAME_INTERVAL    = 0.04     # ~25 Hz frame fetch interval
-KICK_COOLDOWN     = 0.22     # seconds between kicks
+KICK_COOLDOWN     = 5.0      # seconds between kicks (hardware limit)

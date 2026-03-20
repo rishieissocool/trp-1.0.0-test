@@ -27,12 +27,14 @@ from TeamControl.robot.constants import (
 )
 
 # ── Tuning ───────────────────────────────────────────────────────
-APPROACH_SPD   = CHARGE_SPEED       # moderate approach
+APPROACH_SPD   = CRUISE_SPEED        # fast approach
 DRIBBLE_SPD    = DRIBBLE_SPEED      # gentle when close
 WAIT_SPD       = CRUISE_SPEED * 0.6 # repositioning outside box
 DWELL_TIME     = 0.08               # seconds ball must be stable before kick
 KICK_ALIGN_TOL = 0.35               # rad — alignment tolerance for dwell
 FORCE_KICK_TIME = 0.6               # if near ball this long, just kick
+SHOOT_RANGE    = 600                # mm — take a shot from this far if aimed
+SHOOT_ALIGN    = 0.30               # rad — alignment needed for distance shot
 
 
 def _in_penalty_box(px, py, goal_x):
@@ -174,7 +176,23 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             near_ball_since = 0.0
 
         # ═════════════════════════════════════════════════════
-        #  2. KICK — ball close and in front, align and shoot
+        #  2. SHOOT — ball in front and aimed at goal, kick now
+        # ═════════════════════════════════════════════════════
+        elif (d_ball < SHOOT_RANGE and rel_ball[0] > 0
+              and abs(ang_aim) < SHOOT_ALIGN
+              and (now - last_kick) > KICK_COOLDOWN):
+            kick = 1
+            dribble = 0
+            # Charge forward into the ball
+            vx, vy = move_toward(rel_ball, CHARGE_SPEED, ramp_dist=100,
+                                 stop_dist=0)
+            w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
+            last_kick = now
+            near_ball_since = 0.0
+            committed_side = None
+
+        # ═════════════════════════════════════════════════════
+        #  3. KICK — ball close and in front, align and shoot
         # ═════════════════════════════════════════════════════
         elif d_ball < KICK_RANGE and (rel_ball[0] > 0 or not ball_visible):
             dribble = 1
