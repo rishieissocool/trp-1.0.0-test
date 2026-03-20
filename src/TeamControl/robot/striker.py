@@ -30,8 +30,8 @@ from TeamControl.robot.constants import (
 APPROACH_SPD   = CHARGE_SPEED       # moderate approach
 DRIBBLE_SPD    = DRIBBLE_SPEED      # gentle when close
 WAIT_SPD       = CRUISE_SPEED * 0.6 # repositioning outside box
-DWELL_TIME     = 0.25               # seconds ball must be stable before kick
-KICK_ALIGN_TOL = 0.12               # rad — alignment tolerance for dwell
+DWELL_TIME     = 0.15               # seconds ball must be stable before kick
+KICK_ALIGN_TOL = 0.20               # rad — alignment tolerance for dwell
 
 
 def _in_penalty_box(px, py, goal_x):
@@ -237,10 +237,10 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
             if is_behind and d_nav < 300 and d_ball < BALL_NEAR:
-                # Lined up behind ball — slow straight drive with dribbler
+                # Lined up behind ball — drive with dribbler
                 dribble = 1
-                vx, vy = move_toward(rel_ball, DRIBBLE_SPD * 0.7,
-                                     ramp_dist=400, stop_dist=10)
+                vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
+                                     ramp_dist=300, stop_dist=10)
                 w = clamp(ang_aim * TURN_GAIN * 0.7, -MAX_W, MAX_W)
             else:
                 # Navigate toward arc waypoint or behind-ball point

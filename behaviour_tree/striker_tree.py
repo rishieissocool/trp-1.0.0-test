@@ -26,13 +26,14 @@ CHARGE_SPEED = 1.6
 DRIBBLE_SPEED = 1.1
 ONETOUCH_SPEED = 1.8
 
-BEHIND_MM = 250
-CLOSE_TO_BEHIND_MM = 180
+BEHIND_MM = 150
+CLOSE_TO_BEHIND_MM = 250
 KICK_MM = 170
-ALIGN_RAD = 0.32
+ALIGN_RAD = 0.55
 KICK_COOLDOWN_S = 0.22
 STOP_RADIUS = 35
 RAMP_DIST = 350
+MIN_CHARGE_VX = 0.4
 
 # Ball velocity
 BALL_HISTORY_SIZE = 6
@@ -204,8 +205,11 @@ class CalculateStrikerAction(py_trees.behaviour.Behaviour):
             dribble = 1
             vx, vy = move_toward_relative(
                 rel_ball, CHARGE_SPEED,
-                stop_radius=25, ramp_dist=220,
+                stop_radius=15, ramp_dist=220,
             )
+            # Always push forward while charging — prevents halting
+            if vx < MIN_CHARGE_VX and d_ball > 15:
+                vx = MIN_CHARGE_VX
             w = turn_toward(rel_aim, epsilon=0.05, max_w=MAX_W)
 
             if (
