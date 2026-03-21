@@ -162,25 +162,9 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         kick, dribble = 0, 0
 
         # ═════════════════════════════════════════════════════
-        #  1. WAIT — ball inside a penalty box, hold outside
+        #  1. SHOOT — ball in front and aimed at goal, kick now
         # ═════════════════════════════════════════════════════
-        if _in_penalty_box(ball[0], ball[1], goal_x) or \
-           _in_penalty_box(ball[0], ball[1], our_goal_x):
-            box_x = goal_x if _in_penalty_box(ball[0], ball[1], goal_x) \
-                else our_goal_x
-            inward = -1.0 if box_x > 0 else 1.0
-            wait_pt = (box_x + inward * (PENALTY_DEPTH + 120),
-                       clamp(ball[1], -PENALTY_HW, PENALTY_HW))
-            rel_w = world2robot(rpos, wait_pt)
-            vx, vy = move_toward(rel_w, WAIT_SPD)
-            w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-            committed_side = None
-            near_ball_since = 0.0
-
-        # ═════════════════════════════════════════════════════
-        #  2. SHOOT — ball in front and aimed at goal, kick now
-        # ═════════════════════════════════════════════════════
-        elif (d_ball < SHOOT_RANGE and rel_ball[0] > 0
+        if (d_ball < SHOOT_RANGE and rel_ball[0] > 0
               and abs(ang_aim) < SHOOT_ALIGN
               and (now - last_kick) > KICK_COOLDOWN):
             kick = 1
@@ -246,12 +230,6 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                 avoid_radius=AVOID_RADIUS,
                 committed_side=committed_side,
             )
-
-            # Keep out of penalty boxes
-            for gx in (goal_x, our_goal_x):
-                if _in_penalty_box(nav[0], nav[1], gx):
-                    inward = -1.0 if gx > 0 else 1.0
-                    nav = (gx + inward * (PENALTY_DEPTH + 120), nav[1])
 
             rel_nav = world2robot(rpos, nav)
             d_nav = math.hypot(rel_nav[0], rel_nav[1])
