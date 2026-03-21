@@ -15,6 +15,7 @@ from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, compute_arc_nav, wall_brake, rotation_compensate,
 )
+from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.constants import (
     FIELD_LENGTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -85,6 +86,7 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     last_ball_time = 0.0     # when ball was last seen
     last_d_ball = float('inf')  # distance to ball when last seen
     near_ball_since = 0.0    # when we first got close to ball
+    prev_obs_pos = {}        # obstacle positions for predictive avoidance
 
     while is_running.is_set():
         now = time.time()
@@ -265,6 +267,12 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                 vx, vy = move_toward(rel_nav, APPROACH_SPD, ramp_dist=400,
                                      stop_dist=10)
                 w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+
+        # ── Obstacle avoidance (opponent + teammate) ──────
+        avoid_vx, avoid_vy, _closest, prev_obs_pos = _compute_avoidance(
+            rpos, frame, is_yellow, robot_id, rel_ball, prev_obs_pos)
+        vx += avoid_vx
+        vy += avoid_vy
 
         # ── Wall braking ───────────────────────────────────
         vx, vy = wall_brake(rpos[0], rpos[1], vx, vy)
