@@ -1,9 +1,14 @@
 """
-Simple striker — approach, align, kick using shared kick engine.
+Striker with possession awareness — approach, align, kick.
 
-Behaviors checked each tick:
-  1. WAIT  — ball inside penalty box -> hold outside, face ball
-  2. KICK  — ball reachable -> kick engine handles approach + align + burst
+Uses the shared kick_engine for reliable approach + alignment + sustained
+kick bursts.  In 1v1 mode the two strikers won't both blindly chase the
+ball; instead, only the possessor attacks while the other repositions.
+
+Behaviors:
+  POSSESS  — I have the ball or it's loose near me -> kick_engine
+  SHADOW   — opponent has the ball -> stay between ball and my goal
+  WAIT     — ball in penalty box -> hold outside
 """
 
 import time
@@ -13,6 +18,7 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
+    ball_velocity, update_ball_history, predict_ball,
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
@@ -28,10 +34,13 @@ from TeamControl.robot.constants import (
 )
 
 # -- Tuning ---------------------------------------------------------------
-APPROACH_SPD   = CRUISE_SPEED
-WAIT_SPD       = CRUISE_SPEED * 0.6
-
-BALL_MEMORY_TIME = 0.5    # seconds to trust last-known ball when occluded
+APPROACH_SPD     = CRUISE_SPEED
+WAIT_SPD         = CRUISE_SPEED * 0.6
+SHADOW_SPD       = CRUISE_SPEED * 0.7
+BALL_MEMORY_TIME = 0.5
+POSSESS_DIST     = 250      # mm — opponent "has" ball if closer than this and ball in front
+CHALLENGE_DIST   = 600      # mm — close enough to challenge even if opponent has it
+SHADOW_DEPTH     = 400      # mm — how far in front of our goal to shadow
 
 
 def _in_penalty_box(px, py, goal_x):
@@ -65,6 +74,35 @@ def _pick_aim(ball, goal_x, frame, is_yellow):
     return (aim_x, aim_y)
 
 
+def _get_opponent(frame, is_yellow):
+    """Find the closest opponent robot, return (x, y, orientation) or None."""
+    opp_yellow = not is_yellow
+    best = None
+    for oid in range(6):
+        try:
+            opp = frame.get_yellow_robots(isYellow=opp_yellow, robot_id=oid)
+            if isinstance(opp, int) or opp is None:
+                continue
+            op = opp.position
+            if best is None:
+                best = (float(op[0]), float(op[1]), float(op[2]))
+        except Exception:
+            continue
+    return best
+
+
+def _opponent_has_ball(opp, ball):
+    """Check if opponent is possessing the ball (close + ball in front)."""
+    if opp is None or ball is None:
+        return False
+    d = math.hypot(opp[0] - ball[0], opp[1] - ball[1])
+    if d > POSSESS_DIST:
+        return False
+    # Check if ball is roughly in front of opponent
+    rel = world2robot(opp, ball)
+    return rel[0] > -30  # ball not behind them
+
+
 # -- Main loop ------------------------------------------------------------
 
 def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
@@ -74,6 +112,9 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     last_ball_time = 0.0
     last_d_ball = float('inf')
     prev_obs_pos = {}
+
+    ball_history = []
+    last_ball_xy = None
 
     ks = KickState()
 
@@ -122,15 +163,23 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             time.sleep(LOOP_RATE)
             continue
 
+        # -- Ball velocity ----------------------------------------------
+        if ball_visible:
+            last_ball_xy = update_ball_history(
+                ball_history, now, ball, last_ball_xy)
+        bvx, bvy, bspeed = ball_velocity(ball_history)
+
         try:
             us_positive = wm.us_positive()
         except Exception:
             us_positive = True
 
+        # Goal positions
         if is_yellow:
             goal_x = -HALF_LEN if us_positive else HALF_LEN
         else:
             goal_x = HALF_LEN if us_positive else -HALF_LEN
+        our_goal_x = -goal_x
 
         # -- Robot-local vectors ----------------------------------------
         rel_ball = world2robot(rpos, ball)
@@ -139,29 +188,81 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         if ball_visible:
             last_d_ball = d_ball
 
+        # -- Opponent info ----------------------------------------------
+        opp = _get_opponent(frame, is_yellow)
+        opp_has_ball = _opponent_has_ball(opp, ball)
+        opp_dist_to_ball = math.hypot(opp[0] - ball[0], opp[1] - ball[1]) \
+            if opp is not None else float('inf')
+
         aim = _pick_aim(ball, goal_x, frame, is_yellow)
 
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
 
         # ==============================================================
-        #  KICK ENGINE — handles approach, align, contact, burst
+        #  SHADOW — opponent has possession, stay between ball and goal
+        #
+        #  Don't charge in blindly. Position defensively and wait for
+        #  the ball to become loose or come close enough to challenge.
         # ==============================================================
-        kr = kick_tick(ks, rpos, ball, aim, now, rel_ball, d_ball)
-        vx, vy, w = kr.vx, kr.vy, kr.w
-        kick, dribble = kr.kick, kr.dribble
+        if opp_has_ball and d_ball > CHALLENGE_DIST and not ks.bursting:
+            ks.reset()
+
+            # Shadow point: between ball and our goal, offset toward ball
+            bx, by = ball
+            # Direction from our goal to ball
+            dx = bx - our_goal_x
+            dy = by - 0.0
+            dd = max(math.hypot(dx, dy), 1.0)
+            # Position SHADOW_DEPTH in front of our goal, on the ball line
+            shadow_dist = min(dd - SHADOW_DEPTH, dd * 0.6)
+            sx = our_goal_x + dx / dd * max(shadow_dist, 300)
+            sy = dy / dd * max(shadow_dist, 300)
+            # Clamp to field
+            sx = max(-HALF_LEN + 200, min(HALF_LEN - 200, sx))
+            sy = max(-HALF_WID + 150, min(HALF_WID - 150, sy))
+
+            shadow_pt = (sx, sy)
+            rel_shadow = world2robot(rpos, shadow_pt)
+            vx, vy = move_toward(rel_shadow, SHADOW_SPD,
+                                  ramp_dist=400, stop_dist=60)
+            w = _face(rpos, ball)
+
+            # Intercept if ball is coming toward me
+            if bspeed > 200:
+                dx_me = rpos[0] - ball[0]
+                dy_me = rpos[1] - ball[1]
+                dd_me = max(math.hypot(dx_me, dy_me), 1.0)
+                approach_val = (bvx * dx_me + bvy * dy_me) / dd_me
+                if approach_val > 150:
+                    t_arr = max(dd_me / max(bspeed, 1.0), 0.1)
+                    intercept = predict_ball(ball, (bvx, bvy), min(t_arr, 1.5))
+                    dribble = 1
+                    rel_int = world2robot(rpos, intercept)
+                    vx, vy = move_toward(rel_int, APPROACH_SPD,
+                                          ramp_dist=500, stop_dist=30)
+                    w = _face(rpos, ball)
+
+        # ==============================================================
+        #  POSSESS — ball is mine or loose, kick engine handles it
+        # ==============================================================
+        else:
+            kr = kick_tick(ks, rpos, ball, aim, now, rel_ball, d_ball)
+            vx, vy, w = kr.vx, kr.vy, kr.w
+            kick, dribble = kr.kick, kr.dribble
 
         # -- Obstacle avoidance (reduced when dribbling/kicking) --------
-        avoid_vx, avoid_vy, _closest, prev_obs_pos = _compute_avoidance(
-            rpos, frame, is_yellow, robot_id, rel_ball, prev_obs_pos)
-        if dribble == 1 or kick == 1:
-            avoid_vx *= 0.3
-            avoid_vy *= 0.3
-        vx += avoid_vx
-        vy += avoid_vy
+        if not ks.bursting:
+            avoid_vx, avoid_vy, _closest, prev_obs_pos = _compute_avoidance(
+                rpos, frame, is_yellow, robot_id, rel_ball, prev_obs_pos)
+            if dribble == 1 or kick == 1:
+                avoid_vx *= 0.3
+                avoid_vy *= 0.3
+            vx += avoid_vx
+            vy += avoid_vy
 
         # -- Face ball when idle ----------------------------------------
-        if kick == 0 and dribble == 0:
+        if kick == 0 and dribble == 0 and not ks.bursting:
             if abs(ang_ball) < 0.04:
                 w = 0.0
             else:
