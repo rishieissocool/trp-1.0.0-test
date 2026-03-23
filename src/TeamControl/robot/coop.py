@@ -229,25 +229,43 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 print(f"[coop {tag}] ready")
 
         # ══════════════════════════════════════════════════════
-        #  HOME — face ball, catch incoming passes
+        #  HOME — predict incoming ball, move to intercept
         # ══════════════════════════════════════════════════════
         elif mode == "home":
-            vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
-
             if ball is not None:
-                w = _face(me, ball)
+                # Check if ball is moving toward me
+                dx_to_me = me[0] - ball[0]
+                dy_to_me = me[1] - ball[1]
+                dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
+                approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
+
+                if bspeed > 150 and approach_spd > 100:
+                    # Ball coming toward me — predict where it will arrive
+                    t_arrive = max(dd_to_me / max(bspeed, 1.0), 0.1)
+                    intercept = predict_ball(
+                        ball, (bvx, bvy), min(t_arrive, 2.0))
+                    # Move to intercept point, face the ball
+                    dribble = 1
+                    vx, vy = _go_to(me, intercept, APPROACH_SPD,
+                                    stop_r=30, ramp=500)
+                    w = _face(me, ball)
+                else:
+                    # Ball not incoming — stay near home, face ball
+                    vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
+                    w = _face(me, ball)
 
                 # Dribbler on when ball is close (catch incoming pass)
                 if my_dist < 600:
                     dribble = 1
 
-                # Ball is mine → go
+                # Ball is mine → go active
                 if my_dist < CLAIM_DIST and my_dist < mate_dist - 100:
                     mode = "active"
                     committed_side = None
                     near_ball_since = 0.0
                     print(f"[coop {tag}] ball is mine — going for it")
             else:
+                vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
                 w = _face(me, mate_pos)
 
         # ══════════════════════════════════════════════════════
@@ -410,9 +428,23 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 print(f"[coop {tag}] kick burst done — retreating")
 
         # ══════════════════════════════════════════════════════
-        #  RETREAT — go home
+        #  RETREAT — go home, but intercept if ball incoming
         # ══════════════════════════════════════════════════════
         elif mode == "retreat":
+            # If ball is coming toward me, switch to intercept
+            if ball is not None and bspeed > 150:
+                dx_to_me = me[0] - ball[0]
+                dy_to_me = me[1] - ball[1]
+                dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
+                approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
+                if approach_spd > 100:
+                    # Ball coming — go intercept it
+                    mode = "home"
+                    committed_side = None
+                    print(f"[coop {tag}] ball incoming — switching to home")
+                    time.sleep(LOOP_RATE)
+                    continue
+
             vx, vy = _go_to(me, home, APPROACH_SPD)
             w = _face(me, mate_pos)
 
