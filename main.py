@@ -106,15 +106,24 @@ def main():
                           1, preset.us_yellow, WAYPOINTS_B)))
 
     elif args.mode == "coop":
-        # Two robots cooperate to score
+        # Cross-team coop: our bot (yellow id 0) + opp bot (blue id 0)
+        # Both attack toward the opponent's goal (relative to us_yellow)
+        us_yellow = preset.us_yellow
+        opp_yellow = not us_yellow
+        # Both attack toward -x if us_positive & yellow, else +x
+        attack_pos = not preset.us_positive if us_yellow else preset.us_positive
         foreground.append(
             Process(target=run_coop,
                     args=(is_running, dispatch_q, wm,
-                          0, 1, preset.us_yellow)))
+                          0, 0, us_yellow),
+                    kwargs=dict(mate_is_yellow=opp_yellow,
+                                attack_positive=attack_pos)))
         foreground.append(
             Process(target=run_coop,
                     args=(is_running, dispatch_q, wm,
-                          1, 0, preset.us_yellow)))
+                          0, 0, opp_yellow),
+                    kwargs=dict(mate_is_yellow=us_yellow,
+                                attack_positive=attack_pos)))
 
     elif args.mode == "6v6":
         # Full match: one coordinator per team, goalie = robot 0

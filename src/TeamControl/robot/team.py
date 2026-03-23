@@ -104,8 +104,9 @@ DEFEND_LINE       = 1800
 DEFEND_SPREAD     = 1400
 DEFEND_MARK_RATIO = 0.48
 
-WINNER_HYST       = 0.25
+WINNER_HYST       = 0.45      # seconds advantage needed to steal winner role
 POSSESS_DIST      = 500
+WINNER_HOLD_MIN   = 0.6       # seconds — minimum time before winner can change
 
 COUNTER_WINDOW    = 2.0
 COUNTER_ADVANCE   = 1800
@@ -424,24 +425,38 @@ class _PossessionTracker:
 #  ROLE ASSIGNMENT
 # ════════════════════════════════════════════════════════════════════
 
-def _pick_winner(ball, bvel, our, gk, prev_winner):
+def _pick_winner(ball, bvel, our, gk, prev_winner, winner_since, now):
+    """Pick the field robot that should chase the ball.
+
+    Uses intercept-time ranking with hysteresis **and** a minimum hold timer
+    so that the winner doesn't flip-flop every tick when two robots are
+    roughly equidistant from the ball.
+
+    Returns (winner_id, winner_since).
+    """
     fids = [r for r in our if r != gk]
     if not fids:
-        return None
+        return None, now
     times = {}
     for r in fids:
         _, t = _optimal_intercept(our[r], ball, bvel)
         times[r] = t
     best = min(fids, key=lambda r: times[r])
+
     if prev_winner is not None and prev_winner in times:
+        # Enforce minimum hold time — don't even consider switching yet
+        if (now - winner_since) < WINNER_HOLD_MIN:
+            return prev_winner, winner_since
+
         tb = times[best]
         tp = times[prev_winner]
+        # Only switch if the new candidate is clearly better
         if tb < tp - WINNER_HYST:
-            return best
+            return best, now
         if tp > tb + 0.7:
-            return best
-        return prev_winner
-    return best
+            return best, now
+        return prev_winner, winner_since
+    return best, now
 
 
 def _split_field(ball, our, gk, winner, our_gx, opp_gx, poss_state):
@@ -993,6 +1008,7 @@ def run_team(is_running, dispatch_q, wm, is_yellow, goalie_id=0):
     last_kick   = {}
     gk_smooth   = [None, None]
     prev_winner = None
+    winner_since = 0.0
     poss        = _PossessionTracker()
     committed_sides = {}   # robot_id → committed arc side (+1/-1 or None)
 
@@ -1076,7 +1092,8 @@ def run_team(is_running, dispatch_q, wm, is_yellow, goalie_id=0):
         gk = goalie_id if goalie_id in our_full else next(iter(our_full))
 
         # ── Role assignment ────────────────────────────────────
-        winner = _pick_winner(ball, bvel, our_2d, gk, prev_winner)
+        winner, winner_since = _pick_winner(
+            ball, bvel, our_2d, gk, prev_winner, winner_since, now)
         prev_winner = winner
 
         we_have = (winner is not None and winner in our_2d and

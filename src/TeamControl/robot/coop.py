@@ -39,6 +39,8 @@ SUPPORT_LATERAL = 500       # mm — lateral offset from ball-goal line
 FORCE_KICK_TIME = 0.8       # s  — force kick after this long near ball
 POSSESSION_DIST = 350       # mm — attacker "has" the ball if this close
 KEEPAWAY_RADIUS = 600       # mm — support stays at least this far from ball when attacker has possession
+ROLE_HOLD_MIN   = 0.6       # s  — minimum time before role can switch
+ROLE_HYST_DIST  = 200       # mm — distance advantage needed to steal attacker role
 APPROACH_SPD    = CRUISE_SPEED
 DRIBBLE_SPD     = DRIBBLE_SPEED
 
@@ -60,19 +62,31 @@ def _in_penalty_box(px, py, goal_x):
 
 
 def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
-             is_yellow=True):
+             is_yellow=True, mate_is_yellow=None, attack_positive=None):
     """Cooperative striker process for one robot.
 
-    Both robots on the team run this function (with swapped robot_id /
-    teammate_id).  Each independently decides its role every tick based
-    on who is closer to the ball.
+    Both robots run this function (with swapped robot_id / teammate_id).
+    Each independently decides its role every tick based on who is closer
+    to the ball, with hysteresis to prevent rapid back-and-forth switching.
+
+    If mate_is_yellow is provided, the teammate is looked up on that team
+    instead of is_yellow (cross-team coop mode).
+
+    If attack_positive is provided (True/False), both robots attack toward
+    +x (True) or -x (False), overriding the per-team goal logic.  This is
+    needed when the two robots are on different teams but cooperating.
     """
+    if mate_is_yellow is None:
+        mate_is_yellow = is_yellow
+
     frame = None
     last_ft = 0.0
     last_kick = 0.0
     committed_side = None
     near_ball_since = 0.0
     prev_obs_pos = {}
+    prev_role_attacker = None   # None = undecided, True/False = last role
+    role_since = 0.0            # when current role was assigned
 
     while is_running.is_set():
         now = time.time()
@@ -92,7 +106,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             continue
 
         me = _get_robot(frame, is_yellow, robot_id)
-        mate = _get_robot(frame, is_yellow, teammate_id)
+        mate = _get_robot(frame, mate_is_yellow, teammate_id)
         if me is None:
             time.sleep(LOOP_RATE)
             continue
@@ -105,20 +119,42 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         except Exception:
             us_positive = True
 
-        # Opponent goal
-        if is_yellow:
+        # Opponent goal — in cross-team coop, both attack the same goal
+        if attack_positive is not None:
+            goal_x = HALF_LEN if attack_positive else -HALF_LEN
+        elif is_yellow:
             goal_x = -HALF_LEN if us_positive else HALF_LEN
         else:
             goal_x = HALF_LEN if us_positive else -HALF_LEN
 
-        # ── Decide role ──────────────────────────────────────
+        # ── Decide role (with hysteresis) ───────────────────
         my_d = math.hypot(me[0] - ball[0], me[1] - ball[1])
         if mate is not None:
             mate_d = math.hypot(mate[0] - ball[0], mate[1] - ball[1])
-            # Tie-break by robot_id so they don't both pick the same role
-            i_am_attacker = (my_d < mate_d) or (my_d == mate_d and robot_id < teammate_id)
+            # Raw preference: who is closer (tie-break by id)
+            raw_attacker = (my_d < mate_d) or (my_d == mate_d and robot_id < teammate_id)
+
+            if prev_role_attacker is None:
+                # First tick — just pick
+                i_am_attacker = raw_attacker
+            elif (now - role_since) < ROLE_HOLD_MIN:
+                # Hold current role for minimum duration
+                i_am_attacker = prev_role_attacker
+            elif raw_attacker != prev_role_attacker:
+                # Only switch if the new candidate is clearly closer
+                advantage = mate_d - my_d if raw_attacker else my_d - mate_d
+                if advantage > ROLE_HYST_DIST:
+                    i_am_attacker = raw_attacker
+                else:
+                    i_am_attacker = prev_role_attacker
+            else:
+                i_am_attacker = prev_role_attacker
         else:
             i_am_attacker = True
+
+        if i_am_attacker != prev_role_attacker:
+            role_since = now
+        prev_role_attacker = i_am_attacker
 
         # ── Possession check ─────────────────────────────────
         # Attacker "has" the ball if very close to it

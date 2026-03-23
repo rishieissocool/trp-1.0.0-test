@@ -274,13 +274,20 @@ class SimEngine(QObject):
                                        preset.us_yellow, WAYPOINTS_B),
                                  daemon=True))
         elif mode == "coop":
+            # Cross-team coop: our bot + opp bot cooperate toward same goal
+            us_y = preset.us_yellow
+            opp_y = not us_y
+            # Both attack toward the opponent's goal (relative to us_yellow)
+            attack_pos = not preset.us_positive if us_y else preset.us_positive
             procs.append(Process(target=run_coop,
-                                 args=(ev, dq, wm, our_id, opp_id,
-                                       preset.us_yellow),
+                                 args=(ev, dq, wm, our_id, opp_id, us_y),
+                                 kwargs=dict(mate_is_yellow=opp_y,
+                                             attack_positive=attack_pos),
                                  daemon=True))
             procs.append(Process(target=run_coop,
-                                 args=(ev, dq, wm, opp_id, our_id,
-                                       preset.us_yellow),
+                                 args=(ev, dq, wm, opp_id, our_id, opp_y),
+                                 kwargs=dict(mate_is_yellow=us_y,
+                                             attack_positive=attack_pos),
                                  daemon=True))
         elif mode == "6v6":
             procs.append(Process(target=run_team,
