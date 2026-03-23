@@ -116,7 +116,8 @@ class Dispatcher(BaseWorker):
     def add(self, command: RobotCommand, run_time: float):
         robot_id = command.robot_id
         isYellow = command.isYellow
-        self.running_commands[robot_id] = {"isYellow": isYellow,"command": command, "runtime": run_time, "start_time": time.time()}
+        key = (robot_id, isYellow)
+        self.running_commands[key] = {"isYellow": isYellow,"command": command, "runtime": run_time, "start_time": time.time()}
         self.logger.debug(f"[{robot_id=},{isYellow=}] New command added for {run_time}s , command: {command}")
         
     # Check if any commands have expired
@@ -125,33 +126,34 @@ class Dispatcher(BaseWorker):
             now = time.time()
         expired_commands = []
 
-        for robot_id, packet in self.running_commands.items():
+        for key, packet in self.running_commands.items():
             elapsed_time = now - packet["start_time"]
             if elapsed_time >= packet["runtime"]:
-                self.logger.debug(f"[Robot {robot_id}] Command expired after {elapsed_time:.2f}s")
-                expired_commands.append(robot_id)
+                self.logger.debug(f"[Robot {key}] Command expired after {elapsed_time:.2f}s")
+                expired_commands.append(key)
 
-        for robot_id in expired_commands:
-            self.reset_command(robot_id)
+        for key in expired_commands:
+            self.reset_command(key)
 
     # Set a do nothing command for the specified robot
-    def reset_command(self, robot_id):
-        isYellow = self.running_commands[robot_id]["isYellow"]
+    def reset_command(self, key):
+        isYellow = self.running_commands[key]["isYellow"]
+        robot_id = self.running_commands[key]["command"].robot_id
         reset_command = RobotCommand(robot_id=robot_id, vx=0, vy=0, w=0, kick=0, dribble=0,isYellow=isYellow)
         self.logger.debug(f"[{isYellow=} {robot_id}] Reset to idle command")
-        
-        self.running_commands[robot_id] = {"isYellow" : isYellow, "command": reset_command, "runtime": 9999999, "start_time": time.time()}
+
+        self.running_commands[key] = {"isYellow" : isYellow, "command": reset_command, "runtime": 9999999, "start_time": time.time()}
 
     def reset_all_robots(self):
-        for robot_id in self.running_commands:
-            self.reset_command(robot_id=robot_id)
+        for key in list(self.running_commands.keys()):
+            self.reset_command(key)
             
                 
     # Handle all active commands for all robots
     def handle_commands(self, now=None):
         if now is None:
             now = time.time()
-        for robot_id, packet in self.running_commands.items():
+        for key, packet in self.running_commands.items():
             command = packet["command"]
             # if time.time() >= self.last_sent_time + 0.01:
             self.send_command(command, now)
@@ -182,11 +184,10 @@ class Dispatcher(BaseWorker):
         self._last_info_time = now
         try:
             cmds = {}
-            for rid, pkt in self.running_commands.items():
+            for key, pkt in self.running_commands.items():
                 cmd = pkt["command"]
                 elapsed = now - pkt["start_time"]
-                key = (cmd.robot_id, cmd.isYellow)
-                cmds[rid] = {
+                cmds[str(key)] = {
                     "robot_id": cmd.robot_id,
                     "isYellow": pkt["isYellow"],
                     "vx": round(cmd.vx, 3),
