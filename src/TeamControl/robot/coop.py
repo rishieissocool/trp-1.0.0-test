@@ -38,21 +38,21 @@ from TeamControl.robot.constants import (
 #       y
 #    +1115 +----------------------------------------------+
 #          |                                              |
-#        0 |    [YELLOW]  <-- ball -->    [BLUE]          |
-#          |   (-1000,0)                (1000,0)          |
+#        0 |  [YELLOW]    <-- ball -->      [BLUE]        |
+#          | (-1800,0)                    (1800,0)        |
 #          |                                              |
 #    -1115 +----------------------------------------------+
 #        -2250              0               +2250  x
 # =====================================================================
 
-HOME_YELLOW     = (-1000, 0)
-HOME_BLUE       = (1000, 0)
-BALL_START      = (-500, 0)
+HOME_YELLOW     = (-1800, 0)
+HOME_BLUE       = (1800, 0)
+BALL_START      = (-1200, 0)
 
 # -- Tuning ------------------------------------------------------------
 KICK_ALIGN_TOL  = 0.22      # rad — alignment to fire kick
 FORCE_KICK_TIME = 1.0       # s — force kick after this long near ball
-CLAIM_DIST      = 1400      # mm — ball within this = I go for it
+CLAIM_DIST      = 2200      # mm — ball within this = I go for it
 KICK_BURST_T    = 0.35      # s — sustain kick=1 for this long
 CONTACT_DIST    = 130       # mm — ball touching dribbler (90 robot + 21 ball + margin)
 DRIBBLE_SPD     = DRIBBLE_SPEED
@@ -433,14 +433,43 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 committed_side = None
                 print(f"[coop {tag}] home — waiting")
 
-        # -- Obstacle avoidance (not during kick/dribble) ---------------
-        if mode in ("active", "retreat") and dribble == 0 and kick == 0:
-            target_for_avoid = ball if ball is not None else mate_pos
+        # -- Obstacle avoidance (all modes except kicking) ---------------
+        # During kicking we're in contact with ball — don't swerve.
+        # During active+dribble close to ball, reduce avoidance so we
+        # don't get knocked off the ball, but still dodge if needed.
+        if mode != "kicking":
+            if mode == "home":
+                target_for_avoid = ball if ball is not None else mate_pos
+            elif mode == "active":
+                target_for_avoid = ball if ball is not None else mate_pos
+            else:
+                target_for_avoid = home
             rel_target = world2robot(me, target_for_avoid)
-            avoid_vx, avoid_vy, _, prev_obs_pos = _compute_avoidance(
+            avoid_vx, avoid_vy, closest_obs, prev_obs_pos = _compute_avoidance(
                 me, frame, is_yellow, robot_id, rel_target, prev_obs_pos)
+
+            # When dribbling close to ball, reduce avoidance strength
+            # so we don't lose the ball, but still dodge big threats
+            if dribble == 1 and mode == "active":
+                avoid_vx *= 0.4
+                avoid_vy *= 0.4
+
             vx += avoid_vx
             vy += avoid_vy
+
+            # Slow down near obstacles (like navigator does)
+            if closest_obs < 550:
+                if closest_obs <= 260:
+                    speed_frac = 0.5
+                else:
+                    t = (550.0 - closest_obs) / (550.0 - 260.0)
+                    speed_frac = 1.0 - 0.25 * (1.0 - math.cos(math.pi * t))
+                spd = math.hypot(vx, vy)
+                if spd > 0.01:
+                    max_near = APPROACH_SPD * speed_frac
+                    if spd > max_near:
+                        vx = vx / spd * max_near
+                        vy = vy / spd * max_near
 
         # -- Speed cap --------------------------------------------------
         spd = math.hypot(vx, vy)
