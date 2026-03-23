@@ -270,6 +270,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     last_ball_xy = None
     ks = KickState()
     dnav = DiamondNav()
+    dnav.set_exclude((mate_is_yellow, teammate_id))
 
     # Support position planning — only update when ball moves enough
     sup_planned_pos = None       # the locked-in support position
@@ -362,7 +363,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             wp = dnav.next_waypoint(frame, is_yellow, robot_id, me, home)
             nav_target = wp if wp is not None else home
             vx, vy = _go_to(me, nav_target, APPROACH_SPD)
-            w = _face(me, GOAL_TARGET)
+            w = _face(me, ball if ball is not None else GOAL_TARGET)
             if _at(me, home, 200) and (now - setup_time) > SETUP_PAUSE:
                 if is_yellow and not ball_placed and sim:
                     try:
@@ -386,7 +387,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         elif mode == "play":
             if ball is None:
                 vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
-                w = _face(me, GOAL_TARGET)
+                w = _face(me, GOAL_TARGET)  # no ball visible, face goal
 
             # ----------------------------------------------------------
             #  CARRIER — approach ball, decide shoot / pass / dribble
@@ -512,7 +513,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         # ==============================================================
         elif mode == "reset":
             vx, vy = _go_to(me, home, APPROACH_SPD)
-            w = _face(me, GOAL_TARGET)
+            w = _face(me, ball if ball is not None else GOAL_TARGET)
 
             if _at(me, home, 250) and (now - reset_time) > RESET_PAUSE:
                 if is_yellow and sim:

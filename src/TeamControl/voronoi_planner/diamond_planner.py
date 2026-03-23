@@ -3,10 +3,10 @@
 """
 Diamond Path Planner — A* over virtual waypoint nodes around obstacles.
 
-Replaces the Voronoi-based planner with a simpler, more robust approach:
   1. Place virtual nodes in a ring around each obstacle (outside clearance).
   2. Filter nodes that land inside another obstacle's clearance.
   3. Connect visible node pairs, then run A* from start to goal.
+  4. Smooth the path by shortcutting unnecessary intermediate nodes.
 
 Works with the existing Obstacle class from voronoi_planner.obstacle.
 """
@@ -31,37 +31,25 @@ Y_MIN, Y_MAX = -3000, 3000
 class DiamondPlanner:
     """A* path planner that places waypoint nodes around circular obstacles."""
 
-    def __init__(self, obstacles, starts, clearance=CLEARANCE):
+    def __init__(self, obstacles, clearance=CLEARANCE):
         """
         Parameters
         ----------
         obstacles : list[Obstacle]
-            Opponent / static obstacles.
-        starts : numpy array of shape (N, 2)
-            Starting positions of our robots (treated as obstacles too).
+            All obstacles to plan around (opponents, teammates, etc).
+            Do NOT include the planning robot itself.
         clearance : float
             Minimum distance to maintain from obstacles.
         """
-        self.static_obstacles = obstacles
-        self.starts = np.asarray(starts)
+        self.obstacles = obstacles
         self.clearance = clearance
         self.nodes = np.empty((0, 2))
-        self.all_obstacles = []
-        self.build_graph()
+        self._build_graph()
 
-    # ------------------------------------------------------------------
-    #  Graph construction
-    # ------------------------------------------------------------------
-    def build_graph(self):
+    def _build_graph(self):
         self.nodes = []
 
-        start_obstacles = [
-            Obstacle(tuple(s), ROBOT_RADIUS, 1000 + i, True)
-            for i, s in enumerate(self.starts)
-        ]
-        self.all_obstacles = self.static_obstacles + start_obstacles
-
-        for obs in self.all_obstacles:
+        for obs in self.obstacles:
             center = obs.centre()
             r = obs.radius + self.clearance - NODE_MARGIN
 
@@ -73,7 +61,7 @@ class DiamondPlanner:
 
             for node in ring:
                 inside_other = False
-                for other in self.all_obstacles:
+                for other in self.obstacles:
                     if np.linalg.norm(node - other.centre()) < (other.radius + self.clearance):
                         inside_other = True
                         break
@@ -82,36 +70,32 @@ class DiamondPlanner:
 
         self.nodes = np.array(self.nodes) if self.nodes else np.empty((0, 2))
 
-    # ------------------------------------------------------------------
-    #  Collision check
-    # ------------------------------------------------------------------
     def is_path_free(self, start, goal):
-        for obs in self.all_obstacles:
-            if np.allclose(obs.centre(), start) or np.allclose(obs.centre(), goal):
-                continue
+        """Check if a straight line between start and goal is collision-free."""
+        for obs in self.obstacles:
             if obs.intersects_line(start, goal, self.clearance):
                 return False
         return True
 
-    # ------------------------------------------------------------------
-    #  A* path planning
-    # ------------------------------------------------------------------
     def plan_path(self, start, goal):
+        """Compute a collision-free path from start to goal.
+
+        Returns a list of waypoints [start, ..., goal].
+        The path is smoothed — unnecessary intermediate nodes are removed.
+        """
         start = np.asarray(start, dtype=float)
         goal  = np.asarray(goal, dtype=float)
 
         # Handle goal inside an obstacle's clearance
         goal_inside = any(
             np.linalg.norm(goal - obs.centre()) < (obs.radius + self.clearance)
-            for obs in self.all_obstacles
+            for obs in self.obstacles
         )
         if goal_inside and len(self.nodes) > 0:
             best_node, best_dist = None, float("inf")
             for node in self.nodes:
                 if any(np.linalg.norm(node - o.centre()) < (o.radius + self.clearance)
-                       for o in self.all_obstacles):
-                    continue
-                if not self.is_path_free(start, node):
+                       for o in self.obstacles):
                     continue
                 d = np.linalg.norm(node - goal)
                 if d < best_dist:
@@ -127,19 +111,22 @@ class DiamondPlanner:
         if len(self.nodes) == 0:
             return [start, goal]
 
-        # Build extended node list
+        # Build extended node list: [nodes..., start, goal]
         nodes_ext = np.vstack([self.nodes, start, goal])
         start_idx = len(nodes_ext) - 2
         goal_idx  = len(nodes_ext) - 1
         n_nodes   = len(self.nodes)
 
         adj = {i: [] for i in range(len(nodes_ext))}
+
+        # Connect node pairs that can see each other
         for i in range(n_nodes):
             for j in range(i + 1, n_nodes):
                 if self.is_path_free(nodes_ext[i], nodes_ext[j]):
                     adj[i].append(j)
                     adj[j].append(i)
 
+        # Connect start and goal to visible nodes
         for i in range(n_nodes):
             if self.is_path_free(start, nodes_ext[i]):
                 adj[start_idx].append(i)
@@ -152,6 +139,7 @@ class DiamondPlanner:
             adj[start_idx].append(goal_idx)
             adj[goal_idx].append(start_idx)
 
+        # A* search
         def h(a, b):
             return np.linalg.norm(a - b)
 
@@ -167,7 +155,7 @@ class DiamondPlanner:
                     curr = came_from[curr]
                     path.append(nodes_ext[curr])
                 path.reverse()
-                return path
+                return self._smooth(path)
 
             for nb in adj[curr]:
                 g_new = g_score[curr] + np.linalg.norm(nodes_ext[curr] - nodes_ext[nb])
@@ -177,3 +165,24 @@ class DiamondPlanner:
                     came_from[nb] = curr
 
         return [start, goal]
+
+    def _smooth(self, path):
+        """Shortcut unnecessary intermediate waypoints.
+
+        Greedily skip ahead: from path[i], find the furthest path[j]
+        reachable by a straight line, then jump there.
+        """
+        if len(path) <= 2:
+            return path
+        smoothed = [path[0]]
+        i = 0
+        while i < len(path) - 1:
+            # Find the furthest visible point from path[i]
+            best = i + 1
+            for j in range(len(path) - 1, i + 1, -1):
+                if self.is_path_free(path[i], path[j]):
+                    best = j
+                    break
+            smoothed.append(path[best])
+            i = best
+        return smoothed

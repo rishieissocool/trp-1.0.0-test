@@ -93,8 +93,7 @@ class PathPlanner():
                            frame.get_all_in_team_except(isYellow=not self.isYellow, exclude=[])]
         all_obstacles = our_robot_obs + enemy_robot_obs
 
-        starts = np.array([my_pos])
-        self.planner = DiamondPlanner(all_obstacles, starts)
+        self.planner = DiamondPlanner(all_obstacles)
 
     def pathplanning(self):
         """Plan path for this robot to its goal using DiamondPlanner."""
