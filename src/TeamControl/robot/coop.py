@@ -1,12 +1,11 @@
 """
-Cooperative set-piece — staged pass-and-score play for qualification video.
+Cooperative set-piece — staged kick-pass and score for qualification video.
 
-Fully automatic: both robots teleport to marks, ball is auto-placed after a
-short pause, then the play executes a clean diagonal pass → collect → dribble
-→ score sequence.
+Fully automatic: robots teleport, ball auto-placed, then:
+  ATTACKER (yellow):  approach ball → align toward support → KICK pass
+  SUPPORT  (blue):    wait at mark → collect kicked ball → dribble → KICK to score
 
-  ATTACKER (yellow):  line up behind ball → charge through toward support → stop
-  SUPPORT  (blue):    park at receive mark → face ball → collect → dribble → shoot → GOAL
+Both passes use proper kick commands (each robot has its own 5s cooldown).
 
 Field is 4500 × 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -38,38 +37,42 @@ from TeamControl.robot.constants import (
 #       y
 #    +1115 ┌──────────────────────────────────────┐
 #          │                                      │
-#     +350 │      [SUP]              [SHOOT]      │
-#          │    (-300,350)          (1400,200)     │
-#        0 │  [ATK]··[BALL]·····················[GOAL]
-#          │(-1100,0)(-650,0)                +2250│
+#     +550 │                [SUP]                 │
+#          │              (300,550)                │
+#          │            ↗                         │
+#          │         kick                [SHOOT]   │
+#          │       ↗                   (1800,150) │
+#        0 │ [ATK]···[BALL]·····················[GOAL]
+#          │(-1500,0)(-900,0)              +2250  │
 #          │                                      │
 #    -1115 └──────────────────────────────────────┘
 #        -2250              0               +2250  x
 #
+#   Distance ball→support: ~1300mm (nice visible kick)
+#   Distance support→shoot: ~1550mm (clear dribble run)
+#   Distance shoot→goal: ~450mm (close range finish)
 # ═══════════════════════════════════════════════════════════════════
 
 # ── Ball ─────────────────────────────────────────────────────────
-BALL_TRIGGER    = (-650, 0)        # ball auto-placed here
+BALL_TRIGGER    = (-900, 0)
 BALL_TRIGGER_R  = 300
-BALL_STABLE_T   = 2.0              # seconds before play auto-starts
 
 # ── Goal ─────────────────────────────────────────────────────────
 GOAL_X          = HALF_LEN         # +2250
 
 # ── Attacker (yellow) ───────────────────────────────────────────
-ATK_START       = (-1100, 0)       # behind ball, on center line
+ATK_START       = (-1500, 0)       # well behind ball
 ATK_START_ANG   = 0.0
 
-ATK_ARRIVE_R    = 100
-
 # ── Support (blue) ──────────────────────────────────────────────
-SUP_START       = (-300, 350)      # ahead and up — receive target
-SUP_START_ANG   = math.pi + 0.45  # facing back toward ball
+SUP_START       = (300, 550)       # far ahead and high — good pass distance
+SUP_START_ANG   = math.pi + 0.5   # facing back toward ball area
 
-SUP_RECEIVE_R   = 500              # ball "arrived" when this close
+SUP_RECEIVE_R   = 550              # ball "arrived" when this close
 SUP_COLLECT_R   = 180              # ball trapped
 
-SUP_SHOOT_SPOT  = (1400, 200)      # in front of goal, slightly above center
+# After collecting, dribble to shooting spot
+SUP_SHOOT_SPOT  = (1800, 150)      # close to goal, slightly above center
 SUP_SHOOT_R     = 200
 
 SUP_SHOOT_ALIGN = 0.22             # rad alignment tolerance
@@ -79,11 +82,14 @@ FORCE_SHOOT_T   = 1.5              # force kick after this long at shoot spot
 SPD_MOVE        = CRUISE_SPEED
 SPD_DRIBBLE     = DRIBBLE_SPEED
 SPD_CHARGE      = CHARGE_SPEED
-SPD_SPRINT      = SPRINT_SPEED
 
 # ── Timing ──────────────────────────────────────────────────────
 SETUP_PAUSE     = 2.0              # seconds after teleport before ball placement
 BALL_SETTLE     = 0.5              # seconds after ball placement before play starts
+
+# ── Kick approach ───────────────────────────────────────────────
+KICK_APPROACH_R = KICK_RANGE + 30  # get within this to start aligning
+KICK_ALIGN_TOL  = 0.20             # rad — how aligned before kicking
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -129,28 +135,19 @@ def _at(me, target, radius):
     return _dist(me, target) < radius
 
 
-def _angle_to(src, dst):
-    return math.atan2(dst[1] - src[1], dst[0] - src[0])
+def _angle_err_to(me, target):
+    """Return signed angle error from robot heading to target, in radians."""
+    rel = world2robot(me, target)
+    return math.atan2(rel[1], rel[0])
 
 
-def _compute_pass_geometry(ball, support_pos):
-    """Compute attacker lineup + charge target to pass through ball toward support."""
-    bx, by = ball[0], ball[1]
-    sx, sy = support_pos[0], support_pos[1]
-
-    dx = sx - bx
-    dy = sy - by
+def _behind_ball_toward(ball, target, dist_behind=250):
+    """Point that is `dist_behind` mm behind `ball` on the line ball→target."""
+    dx = target[0] - ball[0]
+    dy = target[1] - ball[1]
     d = max(math.hypot(dx, dy), 1.0)
     ux, uy = dx / d, dy / d
-
-    # Line up 250mm behind ball (opposite side from support)
-    lineup = (bx - ux * 250, by - uy * 250)
-    lineup_ang = math.atan2(uy, ux)
-
-    # Charge target: 500mm past ball toward support
-    charge_tgt = (bx + ux * 500, by + uy * 500)
-
-    return lineup, lineup_ang, charge_tgt
+    return (ball[0] - ux * dist_behind, ball[1] - uy * dist_behind)
 
 
 def _pick_goal_aim(frame, is_yellow):
@@ -225,7 +222,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         print(f"  Shoot spot:                {SUP_SHOOT_SPOT}")
         print(f"  Scoring on:                +x goal (x = {GOAL_X})")
         print("-" * 55)
-        print(f"  Play starts automatically in ~{SETUP_PAUSE + BALL_SETTLE}s")
+        print(f"  Play auto-starts in ~{SETUP_PAUSE + BALL_SETTLE}s")
     print("=" * 55)
     print()
 
@@ -242,7 +239,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     shoot_spot_since = 0.0
     setup_time = time.time()
     ball_placed_time = 0.0
-    ball_in_zone_since = 0.0
 
     print(f"[coop {tag}] robot {robot_id} → {state}")
 
@@ -275,28 +271,17 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         mate = _get_robot(frame, mate_is_yellow, teammate_id)
 
-        # Ball-in-zone tracking
-        if ball is not None and _dist(ball, BALL_TRIGGER) < BALL_TRIGGER_R:
-            if ball_in_zone_since == 0.0:
-                ball_in_zone_since = now
-        else:
-            ball_in_zone_since = 0.0
-        ball_stable = (ball_in_zone_since > 0.0 and
-                       (now - ball_in_zone_since) >= BALL_STABLE_T)
-
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
 
         # ══════════════════════════════════════════════════════
-        #  ATTACKER (yellow)
+        #  ATTACKER (yellow) — approach ball, align, kick-pass
         # ══════════════════════════════════════════════════════
 
         if state == "ATK_SETUP":
-            # Wait at start, face ball spot
             vx, vy = _go_to(me, ATK_START, SPD_MOVE)
             w = _face(me, BALL_TRIGGER)
             if _at(me, ATK_START, 120) and (now - setup_time) > SETUP_PAUSE:
-                # Auto-place ball
                 if sim:
                     try:
                         pkt = grSimPacketFactory.ball_replacement_command(
@@ -311,43 +296,56 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 state = "ATK_WAIT_SETTLE"
 
         elif state == "ATK_WAIT_SETTLE":
-            # Hold position while ball settles
             vx, vy = 0.0, 0.0
             w = _face(me, BALL_TRIGGER)
             if (now - ball_placed_time) > BALL_SETTLE:
-                state = "ATK_LINEUP"
-                print("[coop yellow] ball settled — lining up")
+                state = "ATK_APPROACH"
+                print("[coop yellow] approaching ball")
 
-        elif state == "ATK_LINEUP":
-            # Compute lineup behind ball → aimed at support
+        elif state == "ATK_APPROACH":
+            # Drive to behind-ball position aimed at support
             ball_pos = ball if ball is not None else BALL_TRIGGER
             sup_pos = (mate[0], mate[1]) if mate is not None else SUP_START
-            lineup, lineup_ang, _ = _compute_pass_geometry(ball_pos, sup_pos)
+            behind = _behind_ball_toward(ball_pos, sup_pos, dist_behind=200)
 
-            vx, vy = _go_to(me, lineup, SPD_MOVE, stop_r=20, ramp=300)
-            w = _face_angle(me, lineup_ang)
-            if _at(me, lineup, ATK_ARRIVE_R):
-                state = "ATK_CHARGE"
-                print("[coop yellow] lined up — CHARGING through ball!")
+            vx, vy = _go_to(me, behind, SPD_MOVE, stop_r=20, ramp=300)
+            w = _face(me, sup_pos)
 
-        elif state == "ATK_CHARGE":
+            # Close enough and roughly aimed → start final alignment
+            if _at(me, behind, 120):
+                state = "ATK_ALIGN"
+                print("[coop yellow] behind ball — aligning for kick-pass")
+
+        elif state == "ATK_ALIGN":
+            # Creep toward ball with dribbler, rotate to face support
             ball_pos = ball if ball is not None else BALL_TRIGGER
             sup_pos = (mate[0], mate[1]) if mate is not None else SUP_START
-            _, _, charge_tgt = _compute_pass_geometry(ball_pos, sup_pos)
 
-            rel_tgt = world2robot(me, charge_tgt)
-            vx, vy = move_toward(rel_tgt, SPD_SPRINT,
-                                 ramp_dist=50, stop_dist=0)
-            w = _face(me, charge_tgt)
-            if _dist(me, BALL_TRIGGER) > 600:
+            dribble = 1
+            rel_ball = world2robot(me, ball_pos)
+            d_ball = math.hypot(rel_ball[0], rel_ball[1])
+            vx, vy = move_toward(rel_ball, SPD_DRIBBLE,
+                                 ramp_dist=200, stop_dist=10)
+            w = _face(me, sup_pos)
+
+            # Check alignment to support
+            ang_to_sup = _angle_err_to(me, sup_pos)
+
+            if d_ball < KICK_RANGE and abs(ang_to_sup) < KICK_ALIGN_TOL \
+               and (now - last_kick) > KICK_COOLDOWN:
+                kick = 1
+                dribble = 0
+                vx = SPD_CHARGE
+                vy = 0.0
+                last_kick = now
                 state = "ATK_DONE"
-                print("[coop yellow] pass delivered — holding")
+                print("[coop yellow] KICK-PASS delivered!")
 
         elif state == "ATK_DONE":
             vx, vy, w = 0.0, 0.0, 0.0
 
         # ══════════════════════════════════════════════════════
-        #  SUPPORT (blue)
+        #  SUPPORT (blue) — wait, collect, dribble, kick-score
         # ══════════════════════════════════════════════════════
 
         elif state == "SUP_SETUP":
@@ -358,13 +356,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 print("[coop blue] at receive mark — waiting for pass")
 
         elif state == "SUP_WAIT":
-            # Park and face where ball will come from
             vx, vy = 0.0, 0.0
             if ball is not None:
                 w = _face(me, ball)
             else:
                 w = _face(me, BALL_TRIGGER)
-            # Ball arrives near us
             if ball is not None and _dist(ball, me) < SUP_RECEIVE_R:
                 state = "SUP_COLLECT"
                 print("[coop blue] ball incoming — collecting")
@@ -387,7 +383,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             dribble = 1
             goal_aim = _pick_goal_aim(frame, is_yellow)
             vx, vy = _go_to(me, SUP_SHOOT_SPOT, SPD_DRIBBLE, stop_r=30)
-            # Face toward goal while dribbling
             w = _face(me, goal_aim)
             if _at(me, SUP_SHOOT_SPOT, SUP_SHOOT_R):
                 state = "SUP_SHOOT"
@@ -429,7 +424,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # Cap speed
         spd = math.hypot(vx, vy)
-        max_spd = SPD_SPRINT if (kick or state == "ATK_CHARGE") else SPD_MOVE * 1.2
+        max_spd = SPD_CHARGE if kick else SPD_MOVE * 1.2
         if spd > max_spd:
             vx = vx / spd * max_spd
             vy = vy / spd * max_spd
