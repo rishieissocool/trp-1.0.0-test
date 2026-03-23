@@ -33,25 +33,25 @@ from TeamControl.robot.constants import (
 
 
 # =====================================================================
-#  LAYOUT — both attack the +x goal
+#  LAYOUT — both start on the left, attack the +x goal together
 #
 #       y
 #    +1115 +----------------------------------------------+
-#          |                  [BLUE]                [GOAL] |
-#          |                 (0, 650)               (+x)  |
-#        0 |                                              |
-#          |  [YELLOW]                                    |
-#          | (-1400,-650)                                 |
+#          |  [BLUE]                                [GOAL] |
+#          | (-1500, 500)                            (+x)  |
+#        0 |         ball                                  |
+#          |  [YELLOW](-1300,0)                            |
+#          | (-1500,-500)                                  |
 #    -1115 +----------------------------------------------+
 #        -2250              0               +2250  x
 #
-#  1. Yellow picks up ball, passes sideways/diag to Blue
-#  2. Blue receives, shoots at +x goal
+#  1. Yellow picks up ball, passes across to Blue (side pass)
+#  2. Blue receives, advances, shoots at +x goal
 # =====================================================================
 
-HOME_YELLOW     = (-1400, -650)
-HOME_BLUE       = (0, 650)
-BALL_START      = (-1100, -500)
+HOME_YELLOW     = (-1500, -500)
+HOME_BLUE       = (-1500, 500)
+BALL_START      = (-1300, 0)
 GOAL_TARGET     = (HALF_LEN, 0)
 
 # -- Tuning ------------------------------------------------------------
@@ -124,10 +124,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
     role = "passer" if is_yellow else "scorer"
     home = HOME_YELLOW if is_yellow else HOME_BLUE
+    # Yellow faces toward blue (upward pass), blue faces toward goal (+x)
     home_ang = math.atan2(HOME_BLUE[1] - HOME_YELLOW[1],
                           HOME_BLUE[0] - HOME_YELLOW[0]) if is_yellow \
-               else math.atan2(GOAL_TARGET[1] - HOME_BLUE[1],
-                               GOAL_TARGET[0] - HOME_BLUE[0])
+               else 0.0  # face +x toward goal
 
     sim = None
     try:
