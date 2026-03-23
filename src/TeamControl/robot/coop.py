@@ -1,10 +1,8 @@
 """
 Cooperative passing drill — two robots kick the ball back and forth.
 
-Yellow in left half, blue in right half. Each robot uses arc-nav to get
-behind the ball, drives into it with dribbler, aligns toward mate, then
-fires a SUSTAINED kick (kick=1 for ~0.3s) to ensure grSim registers
-the kick rather than just pushing the ball with body inertia.
+Yellow in left half, blue in right half. Uses the shared kick_engine
+for approach, alignment, and sustained kick bursts.
 
 Field is 4500 x 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -17,9 +15,9 @@ from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
     ball_velocity, update_ball_history, predict_ball,
-    compute_arc_nav,
 )
 from TeamControl.robot.navigator import _compute_avoidance
+from TeamControl.robot.kick_engine import KickState, kick_tick
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.robot.constants import (
@@ -50,12 +48,7 @@ HOME_BLUE       = (1800, 0)
 BALL_START      = (-1200, 0)
 
 # -- Tuning ------------------------------------------------------------
-KICK_ALIGN_TOL  = 0.12      # rad (~7 deg) — must face mate before kick
-FORCE_KICK_TIME = 2.5       # s — force kick after this long near ball (last resort)
 CLAIM_DIST      = 2200      # mm — ball within this = I go for it
-KICK_BURST_T    = 0.35      # s — sustain kick=1 for this long
-CONTACT_DIST    = 130       # mm — ball touching dribbler (90 robot + 21 ball + margin)
-DRIBBLE_SPD     = DRIBBLE_SPEED
 APPROACH_SPD    = CRUISE_SPEED
 SETUP_PAUSE     = 2.0
 
@@ -108,8 +101,7 @@ def _at(me, target, radius):
 #  Modes:
 #    setup   — teleport, place ball
 #    home    — predict incoming ball, intercept passes
-#    active  — arc behind ball, dribble, align to mate, kick
-#    kicking — sustained kick burst
+#    active  — kick_engine handles approach + align + burst
 #    retreat — go back to home
 # =====================================================================
 
@@ -146,7 +138,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     mode = "setup"
     frame = None
     last_ft = 0.0
-    last_kick = 0.0
     prev_obs_pos = {}
     setup_time = time.time()
     ball_placed = False
@@ -155,9 +146,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     ball_history = []
     last_ball_xy = None
 
-    committed_side = None
-    near_ball_since = 0.0
-    kick_end_time = 0.0
+    ks = KickState()
 
     while is_running.is_set():
         now = time.time()
@@ -235,7 +224,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
 
                 if bspeed > 150 and approach_spd > 100:
-                    # Ball coming toward me — predict intercept
                     t_arrive = max(dd_to_me / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
                         ball, (bvx, bvy), min(t_arrive, 2.0))
@@ -253,21 +241,15 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 # Ball is mine -> go active
                 if my_dist < CLAIM_DIST and my_dist < mate_dist - 100:
                     mode = "active"
-                    committed_side = None
-                    near_ball_since = 0.0
+                    ks.reset()
                     print(f"[coop {tag}] ball is mine — going for it")
             else:
                 vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
                 w = _face(me, mate_pos)
 
         # ==============================================================
-        #  ACTIVE — get ball, align to mate, trigger kick burst
-        #
-        #  Priority:
-        #    1. Ball touching + aligned to mate -> kick burst
-        #    2. Ball close + in front -> dribble, align
-        #    3. Ball moving toward me -> intercept
-        #    4. Arc behind ball toward mate, drive in
+        #  ACTIVE — kick engine handles everything
+        #  aim = mate_pos (pass to teammate)
         # ==============================================================
         elif mode == "active":
             if ball is None:
@@ -278,68 +260,21 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             # Ball went to mate — retreat
             if my_dist > mate_dist + 200 and my_dist > CLAIM_DIST * 0.7:
                 mode = "retreat"
-                committed_side = None
-                near_ball_since = 0.0
+                ks.reset()
                 print(f"[coop {tag}] ball went to mate — retreating")
                 time.sleep(LOOP_RATE)
                 continue
 
+            # Intercept fast incoming ball
             rel_ball = world2robot(me, ball)
             d_ball = math.hypot(rel_ball[0], rel_ball[1])
-            ang_ball = math.atan2(rel_ball[1], rel_ball[0])
 
-            rel_mate = world2robot(me, mate_pos)
-            ang_mate = math.atan2(rel_mate[1], rel_mate[0])
-
-            # -- P1: Ball touching -> hold with dribbler, rotate to face mate
-            if d_ball < CONTACT_DIST and rel_ball[0] > 0:
-                dribble = 1
-                # Hold ball: gentle forward pressure, mostly rotate
-                vx = DRIBBLE_SPD * 0.3
-                vy = 0.0
-                w = clamp(ang_mate * TURN_GAIN * 1.5, -MAX_W, MAX_W)
-
-                if near_ball_since == 0.0:
-                    near_ball_since = now
-                force_kick = (now - near_ball_since) > FORCE_KICK_TIME
-
-                can_kick = (now - last_kick) > KICK_COOLDOWN
-                aligned = abs(ang_mate) < KICK_ALIGN_TOL
-
-                if can_kick and (aligned or force_kick):
-                    mode = "kicking"
-                    kick_end_time = now + KICK_BURST_T
-                    last_kick = now
-                    near_ball_since = 0.0
-                    committed_side = None
-                    pass_count += 1
-                    print(f"[coop {tag}] KICKING pass #{pass_count}! "
-                          f"(aligned={aligned}, ang={abs(ang_mate):.2f})")
-
-            # -- P2: Ball close + in front -> drive in, start aligning -
-            elif d_ball < KICK_RANGE and rel_ball[0] > 0:
-                dribble = 1
-                vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                     ramp_dist=150, stop_dist=0)
-                # Blend: face ball to drive into it, but start turning toward mate
-                blend = max(0.0, 1.0 - d_ball / KICK_RANGE)  # 0 at range, 1 at contact
-                w_ball = ang_ball * TURN_GAIN
-                w_mate = ang_mate * TURN_GAIN
-                w = clamp(w_ball * (1.0 - blend) + w_mate * blend,
-                          -MAX_W, MAX_W)
-
-                if near_ball_since == 0.0:
-                    near_ball_since = now
-
-            # -- P3: Ball moving toward me -> intercept ----------------
-            elif bspeed > 200 and ball is not None:
-                near_ball_since = 0.0
+            if bspeed > 200:
                 dx = me[0] - ball[0]
                 dy = me[1] - ball[1]
                 dd = max(math.hypot(dx, dy), 1.0)
                 approach_spd_val = (bvx * dx + bvy * dy) / dd
-
-                if approach_spd_val > 150:
+                if approach_spd_val > 150 and d_ball > KICK_RANGE:
                     t_arrive = max(dd / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
                         ball, (bvx, bvy), min(t_arrive, 1.5))
@@ -348,75 +283,29 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                     stop_r=30, ramp=500)
                     w = _face(me, ball)
                 else:
-                    nav, committed_side, is_behind = compute_arc_nav(
-                        robot_xy=(me[0], me[1]),
-                        ball=ball, aim=mate_pos,
-                        behind_dist=BEHIND_DIST,
-                        avoid_radius=AVOID_RADIUS,
-                        committed_side=committed_side)
-                    rel_nav = world2robot(me, nav)
-                    if is_behind and d_ball < BALL_NEAR:
-                        dribble = 1
-                        vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                             ramp_dist=300, stop_dist=0)
-                        w = clamp(ang_mate * TURN_GAIN * 0.7,
-                                  -MAX_W, MAX_W)
-                    else:
-                        vx, vy = move_toward(rel_nav, APPROACH_SPD,
-                                             ramp_dist=400, stop_dist=10)
-                        w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-
-            # -- P4: Arc behind ball toward mate, drive in -------------
+                    # Close enough or not coming at me — let kick engine handle
+                    kr = kick_tick(ks, me, ball, mate_pos, now, rel_ball, d_ball)
+                    vx, vy, w = kr.vx, kr.vy, kr.w
+                    kick, dribble = kr.kick, kr.dribble
+                    if kr.kick_started:
+                        pass_count += 1
+                        print(f"[coop {tag}] KICKING pass #{pass_count}!")
+                    if kr.burst_done:
+                        mode = "retreat"
+                        ks.reset()
+                        print(f"[coop {tag}] kick done — retreating")
             else:
-                near_ball_since = 0.0
-                nav, committed_side, is_behind = compute_arc_nav(
-                    robot_xy=(me[0], me[1]),
-                    ball=ball, aim=mate_pos,
-                    behind_dist=BEHIND_DIST,
-                    avoid_radius=AVOID_RADIUS,
-                    committed_side=committed_side)
-
-                rel_nav = world2robot(me, nav)
-                d_nav = math.hypot(rel_nav[0], rel_nav[1])
-
-                if is_behind and d_nav < 300 and d_ball < BALL_NEAR:
-                    dribble = 1
-                    vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                         ramp_dist=300, stop_dist=0)
-                    w = clamp(ang_mate * TURN_GAIN * 0.7,
-                              -MAX_W, MAX_W)
-                else:
-                    vx, vy = move_toward(rel_nav, APPROACH_SPD,
-                                         ramp_dist=400, stop_dist=10)
-                    w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-
-            # Face ball when not dribbling
-            if dribble == 0 and ball is not None:
-                if abs(ang_ball) > 0.04:
-                    w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-
-        # ==============================================================
-        #  KICKING — sustained kick burst toward mate
-        # ==============================================================
-        elif mode == "kicking":
-            if ball is not None:
-                rel_ball = world2robot(me, ball)
-                d_ball = math.hypot(rel_ball[0], rel_ball[1])
-                if d_ball < CONTACT_DIST + 30:
-                    kick = 1
-                dribble = 1
-                vx, vy = move_toward(rel_ball, CHARGE_SPEED,
-                                     ramp_dist=100, stop_dist=0)
-            else:
-                kick = 1
-                dribble = 1
-                vx = CHARGE_SPEED
-                vy = 0.0
-            w = _face(me, mate_pos)
-
-            if now > kick_end_time:
-                mode = "retreat"
-                print(f"[coop {tag}] kick burst done — retreating")
+                # Ball slow/stationary — kick engine does approach + align + burst
+                kr = kick_tick(ks, me, ball, mate_pos, now, rel_ball, d_ball)
+                vx, vy, w = kr.vx, kr.vy, kr.w
+                kick, dribble = kr.kick, kr.dribble
+                if kr.kick_started:
+                    pass_count += 1
+                    print(f"[coop {tag}] KICKING pass #{pass_count}!")
+                if kr.burst_done:
+                    mode = "retreat"
+                    ks.reset()
+                    print(f"[coop {tag}] kick done — retreating")
 
         # ==============================================================
         #  RETREAT — go home, but intercept if ball incoming
@@ -429,7 +318,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 approach_spd_val = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
                 if approach_spd_val > 100:
                     mode = "home"
-                    committed_side = None
+                    ks.reset()
                     print(f"[coop {tag}] ball incoming — switching to home")
                     time.sleep(LOOP_RATE)
                     continue
@@ -439,14 +328,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
             if _at(me, home, 200):
                 mode = "home"
-                committed_side = None
+                ks.reset()
                 print(f"[coop {tag}] home — waiting")
 
-        # -- Obstacle avoidance (all modes except kicking) ---------------
-        # During kicking we're in contact with ball — don't swerve.
-        # During active+dribble close to ball, reduce avoidance so we
-        # don't get knocked off the ball, but still dodge if needed.
-        if mode != "kicking":
+        # -- Obstacle avoidance (all modes except kicking burst) --------
+        if not ks.bursting:
             if mode == "home":
                 target_for_avoid = ball if ball is not None else mate_pos
             elif mode == "active":
@@ -457,8 +343,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             avoid_vx, avoid_vy, closest_obs, prev_obs_pos = _compute_avoidance(
                 me, frame, is_yellow, robot_id, rel_target, prev_obs_pos)
 
-            # When dribbling close to ball, reduce avoidance strength
-            # so we don't lose the ball, but still dodge big threats
             if dribble == 1 and mode == "active":
                 avoid_vx *= 0.4
                 avoid_vy *= 0.4
@@ -466,7 +350,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             vx += avoid_vx
             vy += avoid_vy
 
-            # Slow down near obstacles (like navigator does)
+            # Slow down near obstacles
             if closest_obs < 550:
                 if closest_obs <= 260:
                     speed_frac = 0.5
