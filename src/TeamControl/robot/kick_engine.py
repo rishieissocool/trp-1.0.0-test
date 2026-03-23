@@ -31,12 +31,17 @@ from TeamControl.robot.constants import (
 )
 
 # -- Tuning (shared across all users) ----------------------------------
-CONTACT_DIST    = 130       # mm — ball touching dribbler (90 robot + 21 ball + margin)
-KICK_ALIGN_TOL  = 0.12      # rad (~7 deg) — must face aim before kick
-KICK_BURST_T    = 0.35      # s — sustain kick=1 for this long
-FORCE_KICK_TIME = 2.5       # s — force kick if stuck near ball this long
+CONTACT_DIST    = 115       # mm — ball touching dribbler (90 robot + 21 ball + small margin)
+KICK_ALIGN_TOL  = 0.18      # rad (~10 deg) — slightly more forgiving alignment
+KICK_BURST_T    = 0.50      # s — sustain kick=1 longer so grSim reliably registers
+FORCE_KICK_TIME = 1.5       # s — force kick sooner if stuck near ball
 DRIBBLE_SPD     = DRIBBLE_SPEED
 APPROACH_SPD    = CRUISE_SPEED
+
+# Forward pressure while dribbling/rotating — keeps ball on dribbler
+HOLD_VX         = DRIBBLE_SPD * 0.55
+# Lateral correction gain — nudge sideways to stay centered on ball
+HOLD_VY_GAIN    = 0.4
 
 
 class KickState:
@@ -116,13 +121,11 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     # ==================================================================
     if ks.bursting:
         r.dribble = 1
-        r.w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
-
-        if d_ball < CONTACT_DIST + 30:
-            r.kick = 1
-        # Drive toward ball to maintain contact
+        r.kick = 1  # always kick during burst — maximise contact window
+        # Drive hard into ball to keep contact
         r.vx, r.vy = move_toward(rel_ball, CHARGE_SPEED,
-                                  ramp_dist=100, stop_dist=0)
+                                  ramp_dist=80, stop_dist=0)
+        r.w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
 
         if now > ks.kick_end_time:
             ks.bursting = False
@@ -132,22 +135,34 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         return r
 
     # ==================================================================
-    #  P1: Ball touching dribbler — hold + rotate to face aim
+    #  P1: Ball touching dribbler — hold + rotate to face aim, then kick
+    #
+    #  Key: strong forward pressure so the ball stays on the dribbler
+    #  while we rotate. Small lateral correction keeps us centered.
     # ==================================================================
-    if d_ball < CONTACT_DIST and rel_ball[0] > 0:
+    if d_ball < CONTACT_DIST and rel_ball[0] > -10:
         r.dribble = 1
-        # Gentle forward pressure to hold ball, mostly rotate
-        r.vx = DRIBBLE_SPD * 0.3
-        r.vy = 0.0
-        r.w = clamp(ang_aim * TURN_GAIN * 1.5, -MAX_W, MAX_W)
+
+        # Forward pressure — keep ball pressed against dribbler
+        r.vx = HOLD_VX
+        # Lateral correction — if ball drifts sideways, nudge toward it
+        r.vy = clamp(rel_ball[1] * HOLD_VY_GAIN, -DRIBBLE_SPD * 0.3,
+                      DRIBBLE_SPD * 0.3)
+        # Rotate to face aim with boosted gain
+        r.w = clamp(ang_aim * TURN_GAIN * 1.8, -MAX_W, MAX_W)
 
         if ks.near_ball_since == 0.0:
             ks.near_ball_since = now
-        force_kick = (now - ks.near_ball_since) > FORCE_KICK_TIME
+        time_near = now - ks.near_ball_since
+        force_kick = time_near > FORCE_KICK_TIME
         can_kick = (now - ks.last_kick) > KICK_COOLDOWN
         aligned = abs(ang_aim) < KICK_ALIGN_TOL
 
-        if can_kick and (aligned or force_kick):
+        # Also kick if we've been near long enough and roughly aligned
+        roughly_aligned = abs(ang_aim) < KICK_ALIGN_TOL * 2.5
+        patient_kick = time_near > (FORCE_KICK_TIME * 0.6) and roughly_aligned
+
+        if can_kick and (aligned or force_kick or patient_kick):
             # Start kick burst
             ks.bursting = True
             ks.kick_end_time = now + KICK_BURST_T
@@ -156,23 +171,29 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
             ks.committed_side = None
             r.kick = 1
             r.kick_started = True
+            # Charge forward into ball
             r.vx, r.vy = move_toward(rel_ball, CHARGE_SPEED,
-                                      ramp_dist=100, stop_dist=0)
+                                      ramp_dist=80, stop_dist=0)
 
         r.committed_side = ks.committed_side
         return r
 
     # ==================================================================
     #  P2: Ball close + in front — drive in with dribbler, start aligning
+    #
+    #  Drive harder toward ball (CHARGE not DRIBBLE) so we close the gap
+    #  fast. Start blending rotation toward aim as we get closer.
     # ==================================================================
-    if d_ball < KICK_RANGE and rel_ball[0] > 0:
+    if d_ball < KICK_RANGE and rel_ball[0] > -10:
         r.dribble = 1
-        r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                  ramp_dist=150, stop_dist=0)
+        # Use charge speed to close the gap fast — don't putter around
+        drive_speed = DRIBBLE_SPD + (CHARGE_SPEED - DRIBBLE_SPD) * 0.5
+        r.vx, r.vy = move_toward(rel_ball, drive_speed,
+                                  ramp_dist=120, stop_dist=0)
         # Blend rotation: face ball far out, face aim when close
-        blend = max(0.0, 1.0 - d_ball / KICK_RANGE)
+        blend = clamp(1.0 - d_ball / KICK_RANGE, 0.0, 1.0)
         w_ball = ang_ball * TURN_GAIN
-        w_aim = ang_aim * TURN_GAIN
+        w_aim = ang_aim * TURN_GAIN * 1.2
         r.w = clamp(w_ball * (1.0 - blend) + w_aim * blend,
                      -MAX_W, MAX_W)
 
@@ -184,6 +205,9 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
 
     # ==================================================================
     #  P3: Arc approach — get behind ball relative to aim, drive in
+    #
+    #  Once lined up behind ball, switch to dribble speed and charge
+    #  straight at the ball with aim-aligned rotation.
     # ==================================================================
     ks.near_ball_since = 0.0
 
@@ -198,14 +222,16 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     rel_nav = world2robot(me, nav)
     d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
-    if is_behind and d_nav < 300 and d_ball < BALL_NEAR:
+    if is_behind and d_nav < 250 and d_ball < BALL_NEAR:
+        # Lined up behind — charge straight at ball
         r.dribble = 1
-        r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                  ramp_dist=300, stop_dist=0)
-        r.w = clamp(ang_aim * TURN_GAIN * 0.7, -MAX_W, MAX_W)
+        r.vx, r.vy = move_toward(rel_ball, CHARGE_SPEED * 0.8,
+                                  ramp_dist=250, stop_dist=0)
+        r.w = clamp(ang_aim * TURN_GAIN * 0.8, -MAX_W, MAX_W)
     else:
+        # Still arcing around — navigate to behind-ball point
         r.vx, r.vy = move_toward(rel_nav, APPROACH_SPD,
-                                  ramp_dist=400, stop_dist=10)
+                                  ramp_dist=350, stop_dist=10)
         r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
 
     r.committed_side = ks.committed_side

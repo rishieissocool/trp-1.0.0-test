@@ -251,8 +251,8 @@ def compute_arc_nav(
     d_ball = math.hypot(rbx, rby)
 
     # ── Do we need to arc? ──────────────────────────────────
-    need_arc = (along > -behind_dist * 0.15) and (d_ball < avoid_radius * 3.0)
-    if d_ball < avoid_radius * 0.9 and along > -behind_dist * 0.5:
+    need_arc = (along > -behind_dist * 0.2) and (d_ball < avoid_radius * 2.5)
+    if d_ball < avoid_radius * 0.8 and along > -behind_dist * 0.5:
         need_arc = True
 
     if not need_arc:
@@ -282,7 +282,7 @@ def compute_arc_nav(
         0.0, 1.0,
     )
 
-    arc_r = avoid_radius * 1.3
+    arc_r = avoid_radius * 1.1  # tighter arc — get behind ball faster
 
     bk_x, bk_y = -ux, -uy
     sd_x, sd_y = px * committed_side, py * committed_side

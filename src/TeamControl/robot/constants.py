@@ -94,11 +94,11 @@ DISTRIBUTE_SPEED  = 0.40 * MAX_SPEED   # dribble to pass
 #  DISTANCES (mm)
 # ═════════════════════════════════════════════════════════════════
 
-KICK_RANGE        = 190      # trigger kick distance
-KICK_DIST         = 190      # alias used by goalie
-BALL_NEAR         = 450      # "close to ball" threshold
-BEHIND_DIST       = 280      # lineup distance behind ball
-AVOID_RADIUS      = 500      # swing-around radius
+KICK_RANGE        = 160      # trigger kick distance — tighter for reliable contact
+KICK_DIST         = 160      # alias used by goalie
+BALL_NEAR         = 400      # "close to ball" threshold
+BEHIND_DIST       = 180      # lineup distance behind ball — closer = faster approach
+AVOID_RADIUS      = 350      # swing-around radius — tighter arc gets behind faster
 MAX_ADVANCE       = PENALTY_DEPTH - 50  # goalie must stay inside penalty box
 
 PRESSURE_DIST     = 500      # mm — opponent "under pressure" radius
@@ -137,4 +137,4 @@ INTERCEPT_STEPS   = 12       # number of prediction steps
 
 LOOP_RATE         = 0.016    # ~60 Hz main loop sleep
 FRAME_INTERVAL    = 0.04     # ~25 Hz frame fetch interval
-KICK_COOLDOWN     = 5.0      # seconds between kicks (hardware limit)
+KICK_COOLDOWN     = 1.0      # seconds between kicks — low for fast passing

@@ -1,13 +1,12 @@
 """
-Cooperative pass-and-score — continuous looping play.
+Cooperative goal scoring — dynamic two-robot teamwork.
 
-Yellow (passer) and Blue (scorer) work together to pass and score on the +x
-goal. After each cycle (pass → receive → shoot), both robots reset to home
-and the ball is re-placed so the play loops for ~1 minute.
+No fixed paths or scripted roles. Each tick the robot closest to the ball
+becomes the *carrier*; the other becomes *support* and positions dynamically
+ahead of play. The carrier shoots when close to goal, otherwise passes to
+the support. After a goal the ball resets and the play loops continuously.
 
-The scorer *advances* to a receive spot as soon as the passer claims the ball,
-and the passer leads the pass to that spot (not the scorer's current position).
-
+Both robots attack the +x goal.
 Field is 4500 x 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
 
@@ -22,6 +21,7 @@ from TeamControl.robot.ball_nav import (
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
+from TeamControl.robot.diamond_nav import DiamondNav
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.robot.constants import (
@@ -34,48 +34,33 @@ from TeamControl.robot.constants import (
 )
 
 
-# =====================================================================
-#  LAYOUT — both start on the left, attack the +x goal together
-#
-#       y
-#    +1115 +----------------------------------------------+
-#          |                                        [GOAL] |
-#          |  [BLUE]         [RECEIVE]               (+x)  |
-#          | (-1500, 500)    (400, 450)                    |
-#        0 |   ball(-1300,0)                               |
-#          |  [YELLOW]                                     |
-#          | (-1500,-500)                                  |
-#    -1115 +----------------------------------------------+
-#        -2250              0               +2250  x
-#
-#  Loop:
-#   1. Yellow goes for ball, Blue advances to RECEIVE_SPOT
-#   2. Yellow passes toward RECEIVE_SPOT (leading the pass)
-#   3. Blue intercepts/receives, advances, shoots at +x goal
-#   4. Both retreat home, ball re-placed, repeat
-# =====================================================================
-
+# Starting positions (setup + reset only — play is fully dynamic)
 HOME_YELLOW     = (-1500, -500)
-HOME_BLUE       = (-1500, 500)
-BALL_START      = (-1300, 0)
+HOME_BLUE       = (-1500,  500)
+BALL_START      = (-1300,    0)
 GOAL_TARGET     = (HALF_LEN, 0)
 
-# Scorer runs here when passer claims ball — forward and offset
-RECEIVE_SPOT    = (400, 450)
-
-# -- Tuning ------------------------------------------------------------
-CLAIM_DIST      = 1800      # mm — ball within this = I go for it
+# -- Decision thresholds -------------------------------------------------
+SHOOT_RANGE     = 1800      # mm — shoot if closer to goal than this
+PASS_MAX_DIST   = 2500      # mm — max distance for a pass attempt
+CARRIER_MARGIN  = 150       # mm — hysteresis for role switching
 APPROACH_SPD    = CRUISE_SPEED
 SETUP_PAUSE     = 2.0
-RESET_PAUSE     = 2.5       # seconds at home before next cycle
-CYCLE_TIMEOUT   = 15.0      # max seconds per cycle before forced reset
+RESET_PAUSE     = 2.0
+CYCLE_TIMEOUT   = 15.0
+
+# -- Support positioning -------------------------------------------------
+SUP_ADVANCE_FRAC = 0.4     # fraction of ball-to-goal distance to advance
+SUP_ADVANCE_MIN  = 500
+SUP_ADVANCE_MAX  = 1500
+SUP_LATERAL      = 550     # mm lateral offset from carrier side
+LANE_CLEARANCE   = 250     # mm obstacle clearance for pass/shot lane
 
 # Exported for UI overlay
 ATK_START       = HOME_YELLOW
 SUP_START       = HOME_BLUE
 BALL_TRIGGER    = BALL_START
-BALL_TRIGGER_R  = CLAIM_DIST
-SUP_SHOOT_SPOT  = RECEIVE_SPOT
+BALL_TRIGGER_R  = 1800
 GOAL_X          = HALF_LEN
 
 
@@ -113,20 +98,81 @@ def _at(me, target, radius):
     return _dist(me, target) < radius
 
 
+def _support_pos(ball, mate_pos):
+    """Dynamic support position: ahead of ball, laterally offset from carrier.
+
+    The support goes to the *opposite* side of the carrier relative to the
+    ball so there is always a clear passing angle.  The advance toward goal
+    scales with remaining distance so the support is always between ball and
+    goal — never behind the play.
+    """
+    bx, by = ball
+    remaining = HALF_LEN - bx
+    advance = clamp(remaining * SUP_ADVANCE_FRAC,
+                    SUP_ADVANCE_MIN, SUP_ADVANCE_MAX)
+    target_x = bx + advance
+
+    # Offset to opposite side of carrier to create passing angle
+    if mate_pos[1] >= by:
+        target_y = by - SUP_LATERAL   # carrier above ball → go below
+    else:
+        target_y = by + SUP_LATERAL   # carrier below ball → go above
+
+    target_x = clamp(target_x, -HALF_LEN + 300, HALF_LEN - 500)
+    target_y = clamp(target_y, -HALF_WID + 200, HALF_WID - 200)
+    return (target_x, target_y)
+
+
+def _get_obstacles(frame, my_yellow, my_id, mate_yellow, mate_id):
+    """Positions of every robot on the field except me and my teammate."""
+    obs = []
+    for is_y in (True, False):
+        for rid in range(6):
+            if is_y == my_yellow and rid == my_id:
+                continue
+            if is_y == mate_yellow and rid == mate_id:
+                continue
+            r = _get_robot(frame, is_y, rid)
+            if r is not None:
+                obs.append((r[0], r[1]))
+    return obs
+
+
+def _lane_clear(start, end, obstacles, clearance=LANE_CLEARANCE):
+    """True if no obstacle is within *clearance* mm of the segment."""
+    sx, sy = start[0], start[1]
+    ex, ey = end[0], end[1]
+    dx, dy = ex - sx, ey - sy
+    length = math.hypot(dx, dy)
+    if length < 1:
+        return True
+    ux, uy = dx / length, dy / length
+    nx, ny = -uy, ux
+    for ox, oy in obstacles:
+        rx, ry = ox - sx, oy - sy
+        along = rx * ux + ry * uy
+        if along < 0 or along > length:
+            continue
+        perp = abs(rx * nx + ry * ny)
+        if perp < clearance:
+            return False
+    return True
+
+
+def _pick_goal_aim(me):
+    """Aim inside the goal mouth toward the far post."""
+    offset = clamp(-me[1] * 0.3, -GOAL_HW * 0.7, GOAL_HW * 0.7)
+    return (HALF_LEN, offset)
+
+
 # =====================================================================
-#  MAIN — one process per robot, continuous looping play
+#  MAIN — one process per robot, continuous dynamic play
 #
-#  Roles:
-#    passer (yellow) — pick up ball, pass to RECEIVE_SPOT
-#    scorer (blue)   — advance to RECEIVE_SPOT, receive, shoot at goal
+#  Modes:  setup → play (loops) → reset → play → …
 #
-#  Modes:
-#    setup   — teleport, place ball
-#    home    — wait at home, watch for ball / mate activity
-#    run     — (scorer only) advance to RECEIVE_SPOT when passer claims ball
-#    active  — kick_engine: approach + align + burst
-#    retreat — go home after kicking
-#    reset   — pause at home, re-place ball, start next cycle
+#  In *play* each tick determines the role from ball proximity:
+#    carrier — closest to ball, uses kick_engine to pass or shoot
+#    support — positions ahead dynamically, intercepts incoming passes
 # =====================================================================
 
 def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
@@ -134,11 +180,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     if mate_is_yellow is None:
         mate_is_yellow = is_yellow
 
-    role = "passer" if is_yellow else "scorer"
     home = HOME_YELLOW if is_yellow else HOME_BLUE
-    home_ang = math.atan2(HOME_BLUE[1] - HOME_YELLOW[1],
-                          HOME_BLUE[0] - HOME_YELLOW[0]) if is_yellow \
-               else 0.0
+    home_ang = (math.atan2(HOME_BLUE[1] - HOME_YELLOW[1],
+                           HOME_BLUE[0] - HOME_YELLOW[0])
+                if is_yellow else 0.0)
 
     sim = None
     try:
@@ -159,23 +204,24 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             print(f"[coop] teleport failed: {e}")
 
     tag = "yellow" if is_yellow else "blue"
-    print(f"[coop {tag}] role={role} home={home}")
+    print(f"[coop {tag}] home={home}")
 
     # -- State ----------------------------------------------------------
     mode = "setup"
+    my_role = "carrier" if is_yellow else "support"
     frame = None
     last_ft = 0.0
     prev_obs_pos = {}
     setup_time = time.time()
     ball_placed = False
+    cycle_start = time.time()
+    cycle_count = 0
+    reset_time = 0.0
 
     ball_history = []
     last_ball_xy = None
-
     ks = KickState()
-    cycle_start = time.time()
-    cycle_count = 0
-    reset_arrived_time = None
+    dnav = DiamondNav()
 
     while is_running.is_set():
         now = time.time()
@@ -218,24 +264,48 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         my_dist = _dist(ball, me[:2]) if ball else float('inf')
         mate_dist = _dist(ball, mate_pos) if ball else float('inf')
 
-        # -- Passer aims at RECEIVE_SPOT, scorer aims at goal -----------
-        aim = RECEIVE_SPOT if role == "passer" else GOAL_TARGET
-
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
 
-        # -- Cycle timeout: force reset if stuck too long ---------------
-        if mode not in ("setup", "reset") and (now - cycle_start) > CYCLE_TIMEOUT:
-            mode = "retreat"
+        # -- Goal detection → reset ------------------------------------
+        if mode == "play" and ball is not None:
+            if ball[0] > HALF_LEN - 80:
+                cycle_count += 1
+                print(f"[coop {tag}] GOAL! (cycle {cycle_count})")
+                mode = "reset"
+                reset_time = now
+                ks.reset()
+
+        # -- Cycle timeout → reset -------------------------------------
+        if mode == "play" and (now - cycle_start) > CYCLE_TIMEOUT:
+            print(f"[coop {tag}] timeout — resetting")
+            mode = "reset"
+            reset_time = now
             ks.reset()
-            print(f"[coop {tag}] cycle timeout — retreating")
+
+        # -- Role determination (play mode only) ------------------------
+        if mode == "play" and ball is not None:
+            if ks.bursting:
+                pass                                    # finish the kick
+            elif my_dist < mate_dist - CARRIER_MARGIN:
+                if my_role != "carrier":
+                    my_role = "carrier"
+                    ks.reset()
+                    print(f"[coop {tag}] -> carrier")
+            elif mate_dist < my_dist - CARRIER_MARGIN:
+                if my_role != "support":
+                    my_role = "support"
+                    ks.reset()
+                    print(f"[coop {tag}] -> support")
 
         # ==============================================================
         #  SETUP
         # ==============================================================
         if mode == "setup":
-            vx, vy = _go_to(me, home, APPROACH_SPD)
-            w = _face(me, aim)
+            wp = dnav.next_waypoint(frame, is_yellow, robot_id, me, home)
+            nav_target = wp if wp is not None else home
+            vx, vy = _go_to(me, nav_target, APPROACH_SPD)
+            w = _face(me, GOAL_TARGET)
             if _at(me, home, 200) and (now - setup_time) > SETUP_PAUSE:
                 if is_yellow and not ball_placed and sim:
                     try:
@@ -244,204 +314,120 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                             y=BALL_START[1] / 1000.0,
                             vx=0.0, vy=0.0)
                         sim.send_packet(pkt)
-                        print(f"[coop yellow] ball placed at {BALL_START}")
+                        print("[coop yellow] ball placed")
                     except Exception:
                         pass
                     ball_placed = True
-                mode = "home"
+                mode = "play"
                 cycle_start = now
-                print(f"[coop {tag}] ready — {role}")
+                print(f"[coop {tag}] play!")
 
         # ==============================================================
-        #  HOME — passer waits then claims ball; scorer watches for
-        #         passer activity or incoming ball
+        #  PLAY — dynamic carrier / support
         # ==============================================================
-        elif mode == "home":
-            if ball is not None:
-                dx_to_me = me[0] - ball[0]
-                dy_to_me = me[1] - ball[1]
-                dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
-                approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
-
-                # Intercept fast incoming ball
-                if bspeed > 150 and approach_spd > 100:
-                    t_arrive = max(dd_to_me / max(bspeed, 1.0), 0.1)
-                    intercept = predict_ball(
-                        ball, (bvx, bvy), min(t_arrive, 2.0))
-                    dribble = 1
-                    vx, vy = _go_to(me, intercept, APPROACH_SPD,
-                                    stop_r=30, ramp=500)
-                    w = _face(me, ball)
-                else:
-                    vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
-                    w = _face(me, ball)
-
-                if my_dist < 600:
-                    dribble = 1
-
-                # PASSER: claim ball and go active
-                if role == "passer":
-                    if my_dist < CLAIM_DIST and my_dist < mate_dist - 100:
-                        mode = "active"
-                        ks.reset()
-                        print(f"[coop {tag}] ball claimed — passing")
-
-                # SCORER: detect passer going for ball → advance to receive
-                if role == "scorer":
-                    # Mate is closer to ball = passer is active → run to receive
-                    if mate_dist < CLAIM_DIST and mate_dist < my_dist - 100:
-                        mode = "run"
-                        print(f"[coop {tag}] passer active — advancing to receive")
-                    # Ball very close to me = I have it → shoot
-                    elif my_dist < 500 and my_dist < mate_dist - 100:
-                        mode = "active"
-                        ks.reset()
-                        print(f"[coop {tag}] ball is mine — shooting")
-
-            else:
+        elif mode == "play":
+            if ball is None:
+                # No ball visible — hold near home
                 vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
-                w = _face(me, aim)
+                w = _face(me, GOAL_TARGET)
 
-        # ==============================================================
-        #  RUN — scorer advances to RECEIVE_SPOT to receive the pass
-        # ==============================================================
-        elif mode == "run":
-            if ball is not None:
+            # ----------------------------------------------------------
+            #  CARRIER — approach ball, decide shoot / pass / dribble
+            # ----------------------------------------------------------
+            elif my_role == "carrier":
+                obstacles = _get_obstacles(
+                    frame, is_yellow, robot_id,
+                    mate_is_yellow, teammate_id)
+
+                rel_ball = world2robot(me, ball)
+                d_ball = math.hypot(rel_ball[0], rel_ball[1])
+                dist_to_goal = _dist(me[:2], GOAL_TARGET)
+                mate_ahead = mate_pos[0] > ball[0] + 200
+
+                # -- Choose aim ----------------------------------------
+                goal_aim = _pick_goal_aim(me)
+                if (dist_to_goal < SHOOT_RANGE
+                        and _lane_clear(me[:2], goal_aim, obstacles)):
+                    aim = goal_aim
+                elif (mate_ahead
+                      and _dist(me[:2], mate_pos) < PASS_MAX_DIST
+                      and _lane_clear(me[:2], mate_pos, obstacles)):
+                    aim = mate_pos
+                else:
+                    # Dribble forward, compress toward field centre
+                    aim = (min(ball[0] + 1000, HALF_LEN - 100),
+                           ball[1] * 0.5)
+
+                # -- Kick engine (with fast-ball intercept) -------------
+                use_ke = True
+                if bspeed > 200 and not ks.bursting:
+                    dx = me[0] - ball[0]
+                    dy = me[1] - ball[1]
+                    dd = max(math.hypot(dx, dy), 1.0)
+                    appr = (bvx * dx + bvy * dy) / dd
+                    if appr > 150 and d_ball > KICK_RANGE:
+                        t_a = max(dd / max(bspeed, 1.0), 0.1)
+                        intercept = predict_ball(
+                            ball, (bvx, bvy), min(t_a, 1.5))
+                        dribble = 1
+                        vx, vy = _go_to(me, intercept, APPROACH_SPD,
+                                        stop_r=30, ramp=500)
+                        w = _face(me, ball)
+                        use_ke = False
+
+                if use_ke:
+                    kr = kick_tick(ks, me, ball, aim, now,
+                                   rel_ball, d_ball)
+                    vx, vy, w = kr.vx, kr.vy, kr.w
+                    kick, dribble = kr.kick, kr.dribble
+                    if kr.kick_started:
+                        if _dist(aim, GOAL_TARGET) < 800:
+                            print(f"[coop {tag}] SHOT!")
+                        else:
+                            print(f"[coop {tag}] PASS!")
+                    if kr.burst_done:
+                        ks.reset()
+
+            # ----------------------------------------------------------
+            #  SUPPORT — position ahead of play, intercept passes
+            # ----------------------------------------------------------
+            else:
+                sup_target = _support_pos(ball, mate_pos)
+
                 dx_to_me = me[0] - ball[0]
                 dy_to_me = me[1] - ball[1]
                 dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
                 approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
 
-                # Ball coming toward me fast — intercept it
                 if bspeed > 150 and approach_spd > 80:
-                    t_arrive = max(dd_to_me / max(bspeed, 1.0), 0.1)
+                    # Ball coming toward me — predict intercept point
+                    t_a = max(dd_to_me / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
-                        ball, (bvx, bvy), min(t_arrive, 2.0))
+                        ball, (bvx, bvy), min(t_a, 2.0))
                     dribble = 1
                     vx, vy = _go_to(me, intercept, APPROACH_SPD * 1.1,
                                     stop_r=30, ramp=500)
                     w = _face(me, ball)
                 else:
-                    # Advance toward receive spot, face back toward ball
-                    vx, vy = _go_to(me, RECEIVE_SPOT, APPROACH_SPD,
+                    # Advance to support position via diamond planner
+                    wp = dnav.next_waypoint(frame, is_yellow, robot_id,
+                                            me, sup_target)
+                    nav_target = wp if wp is not None else sup_target
+                    vx, vy = _go_to(me, nav_target, APPROACH_SPD,
                                     stop_r=60, ramp=500)
                     w = _face(me, ball)
 
                 if my_dist < 600:
                     dribble = 1
 
-                # Ball is mine → go active (shoot)
-                if my_dist < 500 and my_dist < mate_dist - 100:
-                    mode = "active"
-                    ks.reset()
-                    print(f"[coop {tag}] received pass — shooting!")
-            else:
-                # No ball visible, keep advancing
-                vx, vy = _go_to(me, RECEIVE_SPOT, APPROACH_SPD, stop_r=60)
-                w = _face(me, GOAL_TARGET)
-
         # ==============================================================
-        #  ACTIVE — kick engine handles approach + align + burst
-        # ==============================================================
-        elif mode == "active":
-            if ball is None:
-                mode = "home"
-                time.sleep(LOOP_RATE)
-                continue
-
-            # Passer: ball went to mate = pass delivered → retreat
-            if role == "passer":
-                if my_dist > mate_dist + 200 and my_dist > CLAIM_DIST * 0.7:
-                    mode = "retreat"
-                    ks.reset()
-                    print(f"[coop {tag}] pass delivered — retreating")
-                    time.sleep(LOOP_RATE)
-                    continue
-
-            rel_ball = world2robot(me, ball)
-            d_ball = math.hypot(rel_ball[0], rel_ball[1])
-
-            # Intercept fast incoming ball before kick_tick
-            if bspeed > 200 and not ks.bursting:
-                dx = me[0] - ball[0]
-                dy = me[1] - ball[1]
-                dd = max(math.hypot(dx, dy), 1.0)
-                approach_spd_val = (bvx * dx + bvy * dy) / dd
-                if approach_spd_val > 150 and d_ball > KICK_RANGE:
-                    t_arrive = max(dd / max(bspeed, 1.0), 0.1)
-                    intercept = predict_ball(
-                        ball, (bvx, bvy), min(t_arrive, 1.5))
-                    dribble = 1
-                    vx, vy = _go_to(me, intercept, APPROACH_SPD,
-                                    stop_r=30, ramp=500)
-                    w = _face(me, ball)
-                else:
-                    kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
-                    vx, vy, w = kr.vx, kr.vy, kr.w
-                    kick, dribble = kr.kick, kr.dribble
-                    if kr.kick_started:
-                        action = "PASSING" if role == "passer" else "SHOOTING"
-                        print(f"[coop {tag}] {action}!")
-                    if kr.burst_done:
-                        mode = "retreat"
-                        ks.reset()
-                        if role == "passer":
-                            print(f"[coop {tag}] pass done — retreating")
-                        else:
-                            print(f"[coop {tag}] SHOT! — retreating")
-            else:
-                kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
-                vx, vy, w = kr.vx, kr.vy, kr.w
-                kick, dribble = kr.kick, kr.dribble
-                if kr.kick_started:
-                    action = "PASSING" if role == "passer" else "SHOOTING"
-                    print(f"[coop {tag}] {action}!")
-                if kr.burst_done:
-                    mode = "retreat"
-                    ks.reset()
-                    if role == "passer":
-                        print(f"[coop {tag}] pass done — retreating")
-                    else:
-                        print(f"[coop {tag}] SHOT! — retreating")
-
-        # ==============================================================
-        #  RETREAT — go home, then enter reset for next cycle
-        # ==============================================================
-        elif mode == "retreat":
-            # If ball comes back toward me, react
-            if ball is not None and bspeed > 150:
-                dx_to_me = me[0] - ball[0]
-                dy_to_me = me[1] - ball[1]
-                dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
-                approach_spd_val = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
-                if approach_spd_val > 100 and my_dist < CLAIM_DIST:
-                    mode = "home"
-                    ks.reset()
-                    print(f"[coop {tag}] ball incoming — back to home")
-                    time.sleep(LOOP_RATE)
-                    continue
-
-            vx, vy = _go_to(me, home, APPROACH_SPD)
-            w = _face(me, ball if ball is not None else aim)
-
-            if _at(me, home, 200):
-                mode = "reset"
-                reset_arrived_time = now
-                ks.reset()
-                print(f"[coop {tag}] home — waiting for reset")
-
-        # ==============================================================
-        #  RESET — pause briefly at home, re-place ball, start next cycle
+        #  RESET — go home, re-place ball, loop
         # ==============================================================
         elif mode == "reset":
-            vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
-            if ball is not None:
-                w = _face(me, ball)
-            else:
-                w = _face(me, aim)
+            vx, vy = _go_to(me, home, APPROACH_SPD)
+            w = _face(me, GOAL_TARGET)
 
-            if reset_arrived_time and (now - reset_arrived_time) > RESET_PAUSE:
-                # Passer re-places ball for next cycle
+            if _at(me, home, 250) and (now - reset_time) > RESET_PAUSE:
                 if is_yellow and sim:
                     try:
                         pkt = grSimPacketFactory.ball_replacement_command(
@@ -449,26 +435,28 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                             y=BALL_START[1] / 1000.0,
                             vx=0.0, vy=0.0)
                         sim.send_packet(pkt)
-                        cycle_count += 1
-                        print(f"[coop yellow] cycle {cycle_count} — ball reset")
                     except Exception:
                         pass
-                mode = "home"
+                mode = "play"
                 cycle_start = now
-                reset_arrived_time = None
-                print(f"[coop {tag}] starting next cycle")
+                my_role = "carrier" if is_yellow else "support"
+                ks.reset()
+                ball_history.clear()
+                print(f"[coop {tag}] next cycle")
 
-        # -- Obstacle avoidance (all modes except kick burst) -----------
+        # -- Obstacle avoidance (all modes except kick burst) ----------
         if not ks.bursting:
-            if mode in ("home", "active", "run"):
-                target_for_avoid = ball if ball is not None else aim
+            if mode == "play" and ball is not None:
+                target_for_avoid = ball
             else:
                 target_for_avoid = home
             rel_target = world2robot(me, target_for_avoid)
-            avoid_vx, avoid_vy, closest_obs, prev_obs_pos = _compute_avoidance(
-                me, frame, is_yellow, robot_id, rel_target, prev_obs_pos)
+            avoid_vx, avoid_vy, closest_obs, prev_obs_pos = \
+                _compute_avoidance(
+                    me, frame, is_yellow, robot_id,
+                    rel_target, prev_obs_pos)
 
-            if dribble == 1 and mode == "active":
+            if dribble == 1 and my_role == "carrier":
                 avoid_vx *= 0.4
                 avoid_vy *= 0.4
 
@@ -480,7 +468,8 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     speed_frac = 0.5
                 else:
                     t = (550.0 - closest_obs) / (550.0 - 260.0)
-                    speed_frac = 1.0 - 0.25 * (1.0 - math.cos(math.pi * t))
+                    speed_frac = 1.0 - 0.25 * \
+                        (1.0 - math.cos(math.pi * t))
                 spd = math.hypot(vx, vy)
                 if spd > 0.01:
                     max_near = APPROACH_SPD * speed_frac

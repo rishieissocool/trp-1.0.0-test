@@ -361,19 +361,17 @@ class DashboardPage(QWidget):
         if mode == "coop":
             from TeamControl.robot.coop import (
                 HOME_YELLOW, HOME_BLUE, BALL_START, GOAL_TARGET,
-                RECEIVE_SPOT,
             )
             self._field.set_targets([
                 (*HOME_YELLOW, YELLOW_TEAM),
                 (*HOME_BLUE, BLUE_TEAM),
                 (*BALL_START, BALL_COLOR),
-                (*RECEIVE_SPOT, SUCCESS),
                 (*GOAL_TARGET, ACCENT),
             ])
             self._field.set_paths([
                 ([HOME_YELLOW, BALL_START], YELLOW_TEAM),
-                ([BALL_START, RECEIVE_SPOT], SUCCESS),
-                ([RECEIVE_SPOT, GOAL_TARGET], ACCENT),
+                ([HOME_BLUE, BALL_START], BLUE_TEAM),
+                ([BALL_START, GOAL_TARGET], ACCENT),
             ])
         else:
             self._field.set_targets([])

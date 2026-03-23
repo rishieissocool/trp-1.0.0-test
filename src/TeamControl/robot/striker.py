@@ -22,6 +22,7 @@ from TeamControl.robot.ball_nav import (
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
+from TeamControl.robot.diamond_nav import DiamondNav
 from TeamControl.robot.constants import (
     FIELD_LENGTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -118,6 +119,7 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     last_ball_xy = None
 
     ks = KickState()
+    dnav = DiamondNav()
 
     while is_running.is_set():
         now = time.time()
@@ -224,10 +226,15 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             sy = max(-HALF_WID + 150, min(HALF_WID - 150, sy))
 
             shadow_pt = (sx, sy)
-            rel_shadow = world2robot(rpos, shadow_pt)
+            # Use diamond planner to navigate around obstacles to shadow position
+            wp = dnav.next_waypoint(frame, is_yellow, robot_id, rpos, shadow_pt)
+            nav_target = wp if wp is not None else shadow_pt
+            rel_shadow = world2robot(rpos, nav_target)
             vx, vy = move_toward(rel_shadow, SHADOW_SPD,
                                   ramp_dist=400, stop_dist=80)
-            w = _face(rpos, ball)
+            rel_b = world2robot(rpos, ball)
+            ang_b = math.atan2(rel_b[1], rel_b[0])
+            w = clamp(ang_b * TURN_GAIN, -MAX_W, MAX_W)
 
             # If ball comes toward me (opponent kicked/lost), intercept
             if bspeed > 200:
@@ -242,7 +249,9 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                     rel_int = world2robot(rpos, intercept)
                     vx, vy = move_toward(rel_int, APPROACH_SPD,
                                           ramp_dist=500, stop_dist=30)
-                    w = _face(rpos, ball)
+                    rel_b2 = world2robot(rpos, ball)
+                    ang_b2 = math.atan2(rel_b2[1], rel_b2[0])
+                    w = clamp(ang_b2 * TURN_GAIN, -MAX_W, MAX_W)
 
         # ==============================================================
         #  POSSESS — ball is mine or loose, kick engine handles it
