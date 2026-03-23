@@ -38,9 +38,10 @@ APPROACH_SPD     = CRUISE_SPEED
 WAIT_SPD         = CRUISE_SPEED * 0.6
 SHADOW_SPD       = CRUISE_SPEED * 0.7
 BALL_MEMORY_TIME = 0.5
-POSSESS_DIST     = 250      # mm — opponent "has" ball if closer than this and ball in front
-CHALLENGE_DIST   = 600      # mm — close enough to challenge even if opponent has it
-SHADOW_DEPTH     = 400      # mm — how far in front of our goal to shadow
+POSSESS_DIST     = 400      # mm — opponent "has" ball if closer than this
+CHALLENGE_DIST   = 1200     # mm — only challenge when ball this close to me
+SHADOW_DEPTH     = 800      # mm — stay well back from ball when shadowing
+MIN_SHADOW_GAP   = 900      # mm — minimum distance to keep from ball when opp has it
 
 
 def _in_penalty_box(px, py, goal_x):
@@ -200,35 +201,35 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         kick, dribble = 0, 0
 
         # ==============================================================
-        #  SHADOW — opponent has possession, stay between ball and goal
+        #  SHADOW — opponent has possession, give them space
         #
-        #  Don't charge in blindly. Position defensively and wait for
-        #  the ball to become loose or come close enough to challenge.
+        #  Stay well back on the line between ball and our goal.
+        #  Only engage when ball becomes loose or comes to us.
         # ==============================================================
         if opp_has_ball and d_ball > CHALLENGE_DIST and not ks.bursting:
             ks.reset()
 
-            # Shadow point: between ball and our goal, offset toward ball
             bx, by = ball
-            # Direction from our goal to ball
-            dx = bx - our_goal_x
-            dy = by - 0.0
+            # Vector from ball toward our goal
+            dx = our_goal_x - bx
+            dy = 0.0 - by
             dd = max(math.hypot(dx, dy), 1.0)
-            # Position SHADOW_DEPTH in front of our goal, on the ball line
-            shadow_dist = min(dd - SHADOW_DEPTH, dd * 0.6)
-            sx = our_goal_x + dx / dd * max(shadow_dist, 300)
-            sy = dy / dd * max(shadow_dist, 300)
-            # Clamp to field
+
+            # Shadow point: MIN_SHADOW_GAP behind ball, on the ball-goal line
+            # but no further than halfway to our goal
+            gap = max(MIN_SHADOW_GAP, dd * 0.4)
+            sx = bx + dx / dd * gap
+            sy = by + dy / dd * gap
             sx = max(-HALF_LEN + 200, min(HALF_LEN - 200, sx))
             sy = max(-HALF_WID + 150, min(HALF_WID - 150, sy))
 
             shadow_pt = (sx, sy)
             rel_shadow = world2robot(rpos, shadow_pt)
             vx, vy = move_toward(rel_shadow, SHADOW_SPD,
-                                  ramp_dist=400, stop_dist=60)
+                                  ramp_dist=400, stop_dist=80)
             w = _face(rpos, ball)
 
-            # Intercept if ball is coming toward me
+            # If ball comes toward me (opponent kicked/lost), intercept
             if bspeed > 200:
                 dx_me = rpos[0] - ball[0]
                 dy_me = rpos[1] - ball[1]
