@@ -50,8 +50,8 @@ HOME_BLUE       = (1800, 0)
 BALL_START      = (-1200, 0)
 
 # -- Tuning ------------------------------------------------------------
-KICK_ALIGN_TOL  = 0.22      # rad — alignment to fire kick
-FORCE_KICK_TIME = 1.0       # s — force kick after this long near ball
+KICK_ALIGN_TOL  = 0.12      # rad (~7 deg) — must face mate before kick
+FORCE_KICK_TIME = 2.5       # s — force kick after this long near ball (last resort)
 CLAIM_DIST      = 2200      # mm — ball within this = I go for it
 KICK_BURST_T    = 0.35      # s — sustain kick=1 for this long
 CONTACT_DIST    = 130       # mm — ball touching dribbler (90 robot + 21 ball + margin)
@@ -291,33 +291,42 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             rel_mate = world2robot(me, mate_pos)
             ang_mate = math.atan2(rel_mate[1], rel_mate[0])
 
-            # -- P1: Ball touching + aligned -> KICK BURST -------------
+            # -- P1: Ball touching -> hold with dribbler, rotate to face mate
             if d_ball < CONTACT_DIST and rel_ball[0] > 0:
                 dribble = 1
-                vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                     ramp_dist=100, stop_dist=0)
-                w = clamp(ang_mate * TURN_GAIN, -MAX_W, MAX_W)
+                # Hold ball: gentle forward pressure, mostly rotate
+                vx = DRIBBLE_SPD * 0.3
+                vy = 0.0
+                w = clamp(ang_mate * TURN_GAIN * 1.5, -MAX_W, MAX_W)
 
                 if near_ball_since == 0.0:
                     near_ball_since = now
                 force_kick = (now - near_ball_since) > FORCE_KICK_TIME
 
                 can_kick = (now - last_kick) > KICK_COOLDOWN
-                if can_kick and (abs(ang_mate) < KICK_ALIGN_TOL or force_kick):
+                aligned = abs(ang_mate) < KICK_ALIGN_TOL
+
+                if can_kick and (aligned or force_kick):
                     mode = "kicking"
                     kick_end_time = now + KICK_BURST_T
                     last_kick = now
                     near_ball_since = 0.0
                     committed_side = None
                     pass_count += 1
-                    print(f"[coop {tag}] KICKING pass #{pass_count}!")
+                    print(f"[coop {tag}] KICKING pass #{pass_count}! "
+                          f"(aligned={aligned}, ang={abs(ang_mate):.2f})")
 
-            # -- P2: Ball close + in front -> dribble, align -----------
+            # -- P2: Ball close + in front -> drive in, start aligning -
             elif d_ball < KICK_RANGE and rel_ball[0] > 0:
                 dribble = 1
                 vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
                                      ramp_dist=150, stop_dist=0)
-                w = clamp(ang_mate * TURN_GAIN, -MAX_W, MAX_W)
+                # Blend: face ball to drive into it, but start turning toward mate
+                blend = max(0.0, 1.0 - d_ball / KICK_RANGE)  # 0 at range, 1 at contact
+                w_ball = ang_ball * TURN_GAIN
+                w_mate = ang_mate * TURN_GAIN
+                w = clamp(w_ball * (1.0 - blend) + w_mate * blend,
+                          -MAX_W, MAX_W)
 
                 if near_ball_since == 0.0:
                     near_ball_since = now
