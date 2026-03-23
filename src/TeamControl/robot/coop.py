@@ -1,10 +1,14 @@
 """
-Cooperative 2-bot striker — two robots work together to score.
+Cooperative 2-bot striker — two robots work together to score (left → right).
 
 Role assignment each tick (with hysteresis):
-  - Closer to ball  → ATTACKER: approach ball, shoot or pass to support
-  - Farther from ball → SUPPORT: find open receiving spot, park there facing
-    ball, await pass, then one-touch / dribble-and-shoot into goal.
+  - Closer to ball  → ATTACKER: get ball, push-pass it to teammate via inertia
+  - Farther from ball → SUPPORT: find open receiving spot, park facing ball,
+    await pass, then one-touch / dribble-and-shoot into goal.
+
+"Inertia pass" = the attacker lines up behind the ball aimed at the teammate
+and drives through it at speed.  No kick command needed — just momentum.
+This avoids the 5-second kick cooldown entirely.
 
 Both robots avoid every other robot on the field.
 """
@@ -33,14 +37,19 @@ from TeamControl.robot.constants import (
 SHOOT_RANGE     = 350       # mm — shoot from this far if aimed
 SHOOT_ALIGN     = 0.18      # rad — alignment for distance shot
 KICK_ALIGN      = 0.18      # rad — alignment for close kick
-PASS_ALIGN      = 0.25      # rad — alignment tolerance for passing
-PASS_MIN_DIST   = 400       # mm — teammate must be at least this far to pass
 FORCE_KICK_TIME = 0.8       # s  — force kick after this long near ball
 POSSESSION_DIST = 350       # mm — attacker "has" the ball if this close
 ROLE_HOLD_MIN   = 0.6       # s  — minimum time before role can switch
 ROLE_HYST_DIST  = 200       # mm — distance advantage needed to steal attacker role
 APPROACH_SPD    = CRUISE_SPEED
 DRIBBLE_SPD     = DRIBBLE_SPEED
+
+# ── Inertia pass tuning ─────────────────────────────────────────
+PASS_MIN_DIST     = 500     # mm — teammate must be at least this far to pass
+PASS_ALIGN_TOL    = 0.35    # rad — how well aimed at mate before ramming through
+PASS_BEHIND_DIST  = 180     # mm — arc behind ball toward teammate
+PASS_CHARGE_SPD   = SPRINT_SPEED  # full speed ram through ball
+PASS_CLOSE_ENOUGH = 300     # mm — close enough to ball to start the ram
 
 # ── Support / receiver tuning ────────────────────────────────────
 RECV_OFFSET_FWD   = 1200    # mm — how far ahead of ball (toward goal) to position
@@ -96,7 +105,6 @@ def _field_clamp(x, y):
 
 
 # ── Candidate receiving spots ───────────────────────────────────
-# Offsets relative to ball, in attacking direction.  (fwd, lat)
 _RECV_CANDIDATES = [
     (RECV_OFFSET_FWD,  RECV_OFFSET_LAT),
     (RECV_OFFSET_FWD, -RECV_OFFSET_LAT),
@@ -113,16 +121,7 @@ _RECV_CANDIDATES = [
 
 
 def _pick_receive_spot(ball, goal_x, me, mate, opps):
-    """Pick the best open spot for the support robot to receive a pass.
-
-    Scores candidates based on:
-      - clearance from opponents (must be > RECV_OPP_CLEAR)
-      - clearance from attacker / ball
-      - not inside penalty box
-      - has a clear angle to goal (shot potential)
-      - on-field
-    Returns (x, y) in world coordinates.
-    """
+    """Pick the best open spot for the support robot to receive a pass."""
     atk_dir = 1.0 if goal_x > 0 else -1.0
     best_score = -9999
     best_pt = None
@@ -132,13 +131,11 @@ def _pick_receive_spot(ball, goal_x, me, mate, opps):
         cy = ball[1] + lat
         cx, cy = _field_clamp(cx, cy)
 
-        # Skip if inside penalty box
         if _in_penalty_box(cx, cy, goal_x):
             continue
 
         score = 0.0
 
-        # Clearance from opponents — reject if too close
         min_opp_d = min((math.hypot(cx - ox, cy - oy) for ox, oy in opps),
                         default=9999)
         if min_opp_d < RECV_OPP_CLEAR:
@@ -146,7 +143,6 @@ def _pick_receive_spot(ball, goal_x, me, mate, opps):
         else:
             score += min(min_opp_d / 1000, 3.0)
 
-        # Clearance from ball / attacker
         d_ball = math.hypot(cx - ball[0], cy - ball[1])
         if d_ball < RECV_MATE_CLEAR:
             score -= 4.0
@@ -156,20 +152,17 @@ def _pick_receive_spot(ball, goal_x, me, mate, opps):
             if d_mate < RECV_MATE_CLEAR:
                 score -= 3.0
 
-        # Closer to goal is better (but not too close)
         d_goal = abs(cx - goal_x)
         if d_goal < PENALTY_DEPTH + 200:
             score -= 2.0
         else:
             score += max(0, 3.0 - d_goal / 2000)
 
-        # Lateral: prefer positions with a clear angle to goal
         if abs(cy) < GOAL_HW + 400:
             score += 2.0
         if abs(cy) < GOAL_HW:
             score += 1.0
 
-        # Not behind the ball (in attacking direction)
         advance = (cx - ball[0]) * atk_dir
         if advance < 200:
             score -= 5.0
@@ -180,7 +173,6 @@ def _pick_receive_spot(ball, goal_x, me, mate, opps):
             best_score = score
             best_pt = (cx, cy)
 
-    # Fallback: offset from ball toward goal
     if best_pt is None:
         fx = ball[0] + RECV_OFFSET_FWD * atk_dir
         fy = ball[1] + RECV_OFFSET_LAT * (1.0 if ball[1] < 0 else -1.0)
@@ -201,8 +193,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     instead of is_yellow (cross-team coop mode).
 
     If attack_positive is provided (True/False), both robots attack toward
-    +x (True) or -x (False), overriding the per-team goal logic.  This is
-    needed when the two robots are on different teams but cooperating.
+    +x (True) or -x (False), overriding the per-team goal logic.
     """
     if mate_is_yellow is None:
         mate_is_yellow = is_yellow
@@ -213,16 +204,19 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     committed_side = None
     near_ball_since = 0.0
     prev_obs_pos = {}
-    prev_role_attacker = None   # None = undecided, True/False = last role
-    role_since = 0.0            # when current role was assigned
+    prev_role_attacker = None
+    role_since = 0.0
 
     # Ball velocity tracking
     ball_history = []
     last_ball_xy = None
 
     # Support state
-    recv_spot = None            # current receiving spot (world coords)
-    recv_near_since = 0.0       # when ball first got close to support
+    recv_spot = None
+    recv_near_since = 0.0
+
+    # Attacker pass state — tracks the arc-behind-ball toward teammate
+    pass_committed_side = None
 
     while is_running.is_set():
         now = time.time()
@@ -282,7 +276,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # ── Opponents list (for spot evaluation) ─────────────
         opps = _get_opponents(frame, is_yellow)
-        # In cross-team coop, also exclude the mate from the opponent list
         if mate_is_yellow != is_yellow and mate is not None:
             mate_2d = (mate[0], mate[1])
             opps = [o for o in opps
@@ -311,8 +304,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         if i_am_attacker != prev_role_attacker:
             role_since = now
-            recv_spot = None          # reset receiving spot on role change
+            recv_spot = None
             recv_near_since = 0.0
+            pass_committed_side = None
         prev_role_attacker = i_am_attacker
 
         # ── Possession check ─────────────────────────────────
@@ -337,26 +331,30 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         if i_am_attacker:
             # ═══════════════════════════════════════════════════
-            #  ATTACKER — go for the ball, shoot or pass
+            #  ATTACKER — get ball, inertia-pass to teammate
             # ═══════════════════════════════════════════════════
             recv_near_since = 0.0
 
-            # Check if teammate is ready to receive a pass
-            can_pass = False
+            # Decide: should we pass or shoot?
+            # Pass is the priority in coop — only shoot if no teammate
+            # or if we're already very close to goal and well-aimed.
+            want_pass = False
             pass_target = None
-            if mate is not None and (now - last_kick) > KICK_COOLDOWN:
+
+            if mate is not None:
                 mate_to_goal = abs(mate[0] - goal_x)
                 me_to_goal = abs(me[0] - goal_x)
-                mate_clear = abs(mate[1]) < GOAL_HW + 400
-                # Pass if mate is ahead, far enough, and in a scoring zone
-                if (mate_to_goal < me_to_goal
-                        and mate_d > PASS_MIN_DIST
-                        and mate_clear):
-                    rel_mate = world2robot(me, (mate[0], mate[1]))
-                    ang_mate = math.atan2(rel_mate[1], rel_mate[0])
-                    if abs(ang_mate) < PASS_ALIGN and rel_mate[0] > 0:
-                        can_pass = True
-                        pass_target = (mate[0], mate[1])
+                mate_2d_pos = (mate[0], mate[1])
+
+                # Pass if: teammate exists, is far enough, and is roughly
+                # ahead of us (closer to goal) or at least not behind the ball
+                atk_dir = 1.0 if goal_x > 0 else -1.0
+                mate_ahead = (mate[0] - ball[0]) * atk_dir > -200
+                mate_far_enough = mate_d > PASS_MIN_DIST
+
+                if mate_ahead and mate_far_enough:
+                    want_pass = True
+                    pass_target = mate_2d_pos
 
             # Penalty box — wait outside
             if _in_penalty_box(ball[0], ball[1], goal_x):
@@ -368,8 +366,59 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
                 committed_side = None
                 near_ball_since = 0.0
+                pass_committed_side = None
 
-            # Distance shot — ball in front, aimed at goal
+            # ── INERTIA PASS — ram through ball toward teammate ──
+            elif want_pass and pass_target is not None:
+                near_ball_since = 0.0
+
+                # Arc behind ball, aimed at teammate (not goal)
+                nav, pass_committed_side, is_behind = compute_arc_nav(
+                    robot_xy=(me[0], me[1]),
+                    ball=ball,
+                    aim=pass_target,
+                    behind_dist=PASS_BEHIND_DIST,
+                    avoid_radius=AVOID_RADIUS,
+                    committed_side=pass_committed_side,
+                )
+
+                rel_nav = world2robot(me, nav)
+                d_nav = math.hypot(rel_nav[0], rel_nav[1])
+
+                # Check alignment to teammate through ball
+                rel_mate_from_me = world2robot(me, pass_target)
+                ang_to_mate = math.atan2(rel_mate_from_me[1],
+                                         rel_mate_from_me[0])
+
+                if is_behind and d_ball < PASS_CLOSE_ENOUGH:
+                    # We're behind the ball and close — RAM THROUGH IT
+                    # Drive at the ball at full speed, aimed at teammate
+                    if abs(ang_to_mate) < PASS_ALIGN_TOL:
+                        # Lined up — full speed charge through ball
+                        vx, vy = move_toward(rel_ball, PASS_CHARGE_SPD,
+                                             ramp_dist=50, stop_dist=0)
+                        w = clamp(ang_to_mate * TURN_GAIN, -MAX_W, MAX_W)
+                        # No kick, no dribble — pure inertia push
+                    else:
+                        # Close but not aligned yet — dribble and rotate
+                        dribble = 1
+                        vx, vy = move_toward(rel_ball, DRIBBLE_SPD * 0.8,
+                                             ramp_dist=150, stop_dist=10)
+                        w = clamp(ang_to_mate * TURN_GAIN, -MAX_W, MAX_W)
+                elif is_behind and d_nav < 300 and d_ball < BALL_NEAR:
+                    # Almost there — approach gently
+                    dribble = 1
+                    vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
+                                         ramp_dist=300, stop_dist=10)
+                    w = clamp(ang_to_mate * TURN_GAIN * 0.7, -MAX_W, MAX_W)
+                else:
+                    # Navigate to the behind-ball point
+                    vx, vy = move_toward(rel_nav, APPROACH_SPD,
+                                         ramp_dist=400, stop_dist=10)
+                    w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+                    committed_side = None
+
+            # ── SHOOT — no teammate or very close to goal ────
             elif (d_ball < SHOOT_RANGE and rel_ball[0] > 0
                   and abs(ang_aim) < SHOOT_ALIGN
                   and (now - last_kick) > KICK_COOLDOWN):
@@ -380,28 +429,16 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 last_kick = now
                 near_ball_since = 0.0
                 committed_side = None
+                pass_committed_side = None
 
-            # Pass to teammate
-            elif (can_pass and d_ball < KICK_RANGE * 1.5
-                  and rel_ball[0] > 0
-                  and (now - last_kick) > KICK_COOLDOWN):
-                kick = 1
-                vx, vy = move_toward(rel_ball, CHARGE_SPEED,
-                                     ramp_dist=100, stop_dist=0)
-                rel_pt = world2robot(me, pass_target)
-                w = clamp(math.atan2(rel_pt[1], rel_pt[0]) * TURN_GAIN,
-                          -MAX_W, MAX_W)
-                last_kick = now
-                near_ball_since = 0.0
-                committed_side = None
-
-            # Close kick
+            # ── CLOSE KICK — ball in range, try to shoot ─────
             elif d_ball < KICK_RANGE and rel_ball[0] > 0:
                 dribble = 1
                 vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
                                      ramp_dist=150, stop_dist=10)
                 w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
                 committed_side = None
+                pass_committed_side = None
 
                 if near_ball_since == 0.0:
                     near_ball_since = now
@@ -417,12 +454,18 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     last_kick = now
                     near_ball_since = 0.0
 
-            # Approach — arc behind ball
+            # ── APPROACH — arc behind ball toward goal ────────
             else:
                 near_ball_since = 0.0
+                pass_committed_side = None
+
+                # If we want to pass, arc behind ball aimed at teammate
+                # otherwise aim at goal
+                arc_aim = pass_target if (want_pass and pass_target) else aim
+
                 nav, committed_side, is_behind = compute_arc_nav(
                     robot_xy=(me[0], me[1]),
-                    ball=ball, aim=aim,
+                    ball=ball, aim=arc_aim,
                     behind_dist=BEHIND_DIST,
                     avoid_radius=AVOID_RADIUS,
                     committed_side=committed_side,
@@ -434,7 +477,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     dribble = 1
                     vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
                                          ramp_dist=300, stop_dist=10)
-                    w = clamp(ang_aim * TURN_GAIN * 0.7, -MAX_W, MAX_W)
+                    target_ang = ang_aim
+                    if want_pass and pass_target:
+                        rel_pt = world2robot(me, pass_target)
+                        target_ang = math.atan2(rel_pt[1], rel_pt[0])
+                    w = clamp(target_ang * TURN_GAIN * 0.7, -MAX_W, MAX_W)
                 else:
                     vx, vy = move_toward(rel_nav, APPROACH_SPD,
                                          ramp_dist=400, stop_dist=10)
@@ -446,38 +493,34 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             # ═══════════════════════════════════════════════════
             committed_side = None
             near_ball_since = 0.0
+            pass_committed_side = None
 
             # Detect if the ball is incoming toward me (pass in flight)
             ball_toward_me = False
             if ball_speed > RECV_BALL_INCOMING and d_ball < 2000:
-                # Check if ball velocity vector points roughly at me
                 to_me_x = me[0] - ball[0]
                 to_me_y = me[1] - ball[1]
                 to_me_d = math.hypot(to_me_x, to_me_y)
                 if to_me_d > 1:
                     cos_angle = (bvx * to_me_x + bvy * to_me_y) / (ball_speed * to_me_d)
-                    if cos_angle > 0.5:   # within ~60 degrees
+                    if cos_angle > 0.5:
                         ball_toward_me = True
 
             # ── STATE: Ball arrived / very close → FINISH ────
             if d_ball < RECV_CLOSE or (ball_toward_me and d_ball < RECV_CLOSE * 1.5):
-                # Pick best aim point in goal (away from center for corner)
                 aim_y = -GOAL_HW * 0.5 if me[1] > 0 else GOAL_HW * 0.5
                 finish_aim = (goal_x, aim_y)
                 rel_finish = world2robot(me, finish_aim)
                 ang_finish = math.atan2(rel_finish[1], rel_finish[0])
 
-                # Track how long ball has been near us
                 if recv_near_since == 0.0:
                     recv_near_since = now
                 near_duration = now - recv_near_since
                 force_kick = near_duration > RECV_FORCE_KICK
 
                 if d_ball < KICK_RANGE and rel_ball[0] > -40:
-                    # Ball in kicker range — try to finish
                     if ((abs(ang_finish) < RECV_FINISH_ALIGN or force_kick)
                             and (now - last_kick) > KICK_COOLDOWN):
-                        # One-touch kick into goal
                         kick = 1
                         dribble = 0
                         vx, vy = move_toward(rel_ball, CHARGE_SPEED,
@@ -486,13 +529,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                         last_kick = now
                         recv_near_since = 0.0
                     else:
-                        # Dribble and align to goal
                         dribble = 1
                         vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
                                              ramp_dist=150, stop_dist=10)
                         w = clamp(ang_finish * TURN_GAIN, -MAX_W, MAX_W)
                 else:
-                    # Ball close but not in kicker — move toward it
                     vx, vy = move_toward(rel_ball, APPROACH_SPD,
                                          ramp_dist=300, stop_dist=10)
                     w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
@@ -500,24 +541,19 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             # ── STATE: Ball incoming → INTERCEPT ─────────────
             elif ball_toward_me:
                 recv_near_since = 0.0
-                # Move toward the ball to intercept it cleanly
                 dribble = 1
                 vx, vy = move_toward(rel_ball, APPROACH_SPD * 0.8,
                                      ramp_dist=400, stop_dist=20)
-                # Pre-orient toward goal while intercepting
                 aim_y = -GOAL_HW * 0.5 if me[1] > 0 else GOAL_HW * 0.5
                 finish_aim = (goal_x, aim_y)
                 rel_finish = world2robot(me, finish_aim)
                 ang_finish = math.atan2(rel_finish[1], rel_finish[0])
-                # Blend: mostly face ball, but bias toward goal
                 blend_ang = ang_ball * 0.6 + ang_finish * 0.4
                 w = clamp(blend_ang * TURN_GAIN, -MAX_W, MAX_W)
 
             # ── STATE: Awaiting pass → POSITION at open spot ─
             else:
                 recv_near_since = 0.0
-
-                # Re-evaluate receiving spot periodically or if we don't have one
                 mate_2d = (mate[0], mate[1]) if mate is not None else None
                 recv_spot = _pick_receive_spot(ball, goal_x, me, mate_2d, opps)
 
@@ -526,15 +562,12 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 d_target = math.hypot(rel_t[0], rel_t[1])
 
                 if d_target < RECV_STOP_DIST:
-                    # Parked at spot — face the ball, stay still
                     vx, vy = 0.0, 0.0
                     w = clamp(ang_ball * FACE_BALL_GAIN, -MAX_W, MAX_W)
                 else:
-                    # Move toward the receiving spot
                     speed = CRUISE_SPEED if d_target > 500 else CRUISE_SPEED * 0.6
                     vx, vy = move_toward(rel_t, speed, ramp_dist=400,
                                          stop_dist=RECV_STOP_DIST)
-                    # Face the ball while moving
                     w = clamp(ang_ball * FACE_BALL_GAIN, -MAX_W, MAX_W)
 
         # ── Obstacle avoidance ────────────────────────────────
