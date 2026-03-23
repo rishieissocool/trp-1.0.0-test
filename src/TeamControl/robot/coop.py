@@ -1,13 +1,13 @@
 """
 Cooperative passing drill — two robots kick the ball back and forth.
 
-Yellow stays in the left half, blue in the right half.  Ball is auto-placed
-near yellow to start.  Each robot runs the same state machine:
+Yellow in left half, blue in right half. Each robot uses the SAME proven
+kick logic from striker.py: arc behind ball → drive into ball with dribbler
+facing the aim target → kick when aligned. Aim target = teammate.
 
-  IDLE → INTERCEPT → APPROACH → POSSESS → KICK → RETREAT → IDLE (loop)
-
-Uses ball velocity prediction for interception, arc navigation to get behind
-the ball, and careful dribble-align-kick sequencing.
+After kicking, robot retreats home and waits for the return pass.
+Receiving robot faces the incoming ball with dribbler on to catch it,
+then runs the same kick sequence back.
 
 Field is 4500 × 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -29,7 +29,7 @@ from TeamControl.robot.constants import (
     HALF_LEN, HALF_WID,
     GOAL_HW, GOAL_DEPTH,
     KICK_RANGE, BALL_NEAR, BEHIND_DIST, AVOID_RADIUS,
-    CRUISE_SPEED, CHARGE_SPEED, DRIBBLE_SPEED, SPRINT_SPEED,
+    CRUISE_SPEED, CHARGE_SPEED, DRIBBLE_SPEED,
     MAX_W, TURN_GAIN,
     KICK_COOLDOWN, LOOP_RATE, FRAME_INTERVAL,
 )
@@ -41,41 +41,33 @@ from TeamControl.robot.constants import (
 #       y
 #    +1115 ┌──────────────────────────────────────┐
 #          │                                      │
-#          │                                      │
 #        0 │    [YELLOW]  ← ball →    [BLUE]      │
 #          │   (-1000,0)              (1000,0)     │
 #          │                                      │
 #    -1115 └──────────────────────────────────────┘
 #        -2250              0               +2250  x
-#
-#   ~2000mm apart — clear kick distance
 # ═══════════════════════════════════════════════════════════════════
 
 HOME_YELLOW     = (-1000, 0)
 HOME_BLUE       = (1000, 0)
 BALL_START      = (-500, 0)
 
-# ── Thresholds ──────────────────────────────────────────────────
-CLAIM_R         = 1200      # ball within this → I go get it
-CLOSE_R         = 400       # close enough to start arc-behind approach
-POSSESS_R       = KICK_RANGE + 20   # ball trapped on dribbler
-KICK_ALIGN      = 0.18      # rad — alignment tolerance for kick
-MIN_POSSESS_T   = 0.25      # seconds — hold ball before kicking (let alignment settle)
-KICK_BURST_T    = 0.25      # seconds — keep kick+forward on after firing
+# ── Tuning (same as striker) ────────────────────────────────────
+SHOOT_RANGE     = 350       # mm — take a kick from this far if aimed
+SHOOT_ALIGN     = 0.18      # rad — alignment for long-range kick
+KICK_ALIGN_TOL  = 0.18      # rad — alignment for close-range kick
+FORCE_KICK_TIME = 0.6       # s — force kick after this long near ball
+CLAIM_DIST      = 1400      # mm — ball within this = my ball
+DRIBBLE_SPD     = DRIBBLE_SPEED
+APPROACH_SPD    = CRUISE_SPEED
 
-# ── Speeds ──────────────────────────────────────────────────────
-SPD_CRUISE      = CRUISE_SPEED
-SPD_DRIBBLE     = DRIBBLE_SPEED
-SPD_CHARGE      = CHARGE_SPEED
-
-# ── Timing ──────────────────────────────────────────────────────
 SETUP_PAUSE     = 2.0
 
 # Exported for UI overlay
 ATK_START       = HOME_YELLOW
 SUP_START       = HOME_BLUE
 BALL_TRIGGER    = BALL_START
-BALL_TRIGGER_R  = CLAIM_R
+BALL_TRIGGER_R  = CLAIM_DIST
 SUP_SHOOT_SPOT  = HOME_BLUE
 GOAL_X          = HALF_LEN
 
@@ -110,27 +102,12 @@ def _face(me, target):
     return clamp(ang * TURN_GAIN, -MAX_W, MAX_W)
 
 
-def _face_angle(me, desired_angle):
-    err = desired_angle - me[2]
-    while err > math.pi:
-        err -= 2 * math.pi
-    while err < -math.pi:
-        err += 2 * math.pi
-    return clamp(err * TURN_GAIN, -MAX_W, MAX_W)
-
-
 def _at(me, target, radius):
     return _dist(me, target) < radius
 
 
-def _ang_err(me, target):
-    """Signed angle from robot heading to target point, radians."""
-    rel = world2robot(me, target)
-    return math.atan2(rel[1], rel[0])
-
-
 # ═══════════════════════════════════════════════════════════════════
-#  MAIN — one process per robot, both run the same loop
+#  MAIN — one process per robot
 # ═══════════════════════════════════════════════════════════════════
 
 def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
@@ -160,17 +137,16 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             print(f"[coop] teleport failed: {e}")
 
     tag = "yellow" if is_yellow else "blue"
-    print()
-    print("=" * 55)
-    print("  COOP PASSING DRILL")
-    print("=" * 55)
-    print(f"  Yellow: {HOME_YELLOW}   Blue: {HOME_BLUE}")
-    print(f"  Ball start: {BALL_START}")
-    print("=" * 55)
-    print()
+    print(f"[coop {tag}] Passing drill — home={home}")
 
-    # ── State ────────────────────────────────────────────────
-    state = "SETUP"
+    # ── Tracking state ───────────────────────────────────────
+    # Three modes: "setup", "home", "active", "retreat"
+    #   setup   — wait, place ball
+    #   home    — at home, face ball, dribbler on if ball near. Ball mine → active
+    #   active  — striker-like: arc behind ball, drive+dribble, kick when aligned
+    #   retreat — go back home after kicking
+    mode = "setup"
+
     frame = None
     last_ft = 0.0
     last_kick = 0.0
@@ -179,20 +155,13 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     ball_placed = False
     pass_count = 0
 
-    # Ball tracking
+    # Ball tracking for velocity
     ball_history = []
     last_ball_xy = None
 
-    # Possess timing
-    possess_since = 0.0
-
-    # Kick burst
-    kick_burst_until = 0.0
-
-    # Arc navigation
+    # Striker-like state
     committed_side = None
-
-    print(f"[coop {tag}] robot {robot_id} → SETUP")
+    near_ball_since = 0.0
 
     while is_running.is_set():
         now = time.time()
@@ -225,34 +194,25 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         mate_pos = (mate[0], mate[1]) if mate is not None else \
                    (HOME_BLUE if is_yellow else HOME_YELLOW)
 
-        # ── Ball velocity tracking ───────────────────────────
+        # ── Ball velocity ────────────────────────────────────
         if ball is not None:
             last_ball_xy = update_ball_history(
                 ball_history, now, ball, last_ball_xy)
         bvx, bvy, bspeed = ball_velocity(ball_history)
 
-        # ── Am I the closer robot? ───────────────────────────
+        # ── Ownership: am I closer to the ball? ──────────────
         my_dist = _dist(ball, me[:2]) if ball else float('inf')
         mate_dist = _dist(ball, mate_pos) if ball else float('inf')
-        ball_is_mine = my_dist < mate_dist - 50  # small hysteresis
 
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
 
-        # ── Active kick burst (keep driving after kick) ──────
-        if now < kick_burst_until:
-            kick = 1
-            dribble = 0
-            vx = SPD_CHARGE
-            vy = 0.0
+        # ══════════════════════════════════════════════════════
+        #  SETUP — teleport, auto-place ball
+        # ══════════════════════════════════════════════════════
+        if mode == "setup":
+            vx, vy = _go_to(me, home, APPROACH_SPD)
             w = _face(me, mate_pos)
-        # ══════════════════════════════════════════════════════
-        #  STATE MACHINE
-        # ══════════════════════════════════════════════════════
-
-        elif state == "SETUP":
-            vx, vy = _go_to(me, home, SPD_CRUISE)
-            w = _face_angle(me, home_ang)
             if _at(me, home, 200) and (now - setup_time) > SETUP_PAUSE:
                 if is_yellow and not ball_placed and sim:
                     try:
@@ -261,161 +221,211 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                             y=BALL_START[1] / 1000.0,
                             vx=0.0, vy=0.0)
                         sim.send_packet(pkt)
-                        print("[coop yellow] ball placed")
+                        print(f"[coop yellow] ball placed at {BALL_START}")
                     except Exception:
                         pass
                     ball_placed = True
-                state = "IDLE"
-                print(f"[coop {tag}] ready — waiting for ball")
+                mode = "home"
+                print(f"[coop {tag}] ready")
 
-        elif state == "IDLE":
-            # Stay at home, face ball
-            vx, vy = _go_to(me, home, SPD_CRUISE, stop_r=80)
+        # ══════════════════════════════════════════════════════
+        #  HOME — wait for the ball to come to me
+        # ══════════════════════════════════════════════════════
+        elif mode == "home":
+            # Stay at home, face the ball
+            vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
+
             if ball is not None:
                 w = _face(me, ball)
+
+                # Dribbler on when ball is approaching (catch it)
+                if my_dist < 500:
+                    dribble = 1
+
+                # Ball is mine → go get it
+                if my_dist < CLAIM_DIST and my_dist < mate_dist - 100:
+                    mode = "active"
+                    committed_side = None
+                    near_ball_since = 0.0
+                    print(f"[coop {tag}] ball is mine — going for it")
             else:
                 w = _face(me, mate_pos)
 
-            # Ball is mine and within claim range → go intercept
-            if ball is not None and ball_is_mine and my_dist < CLAIM_R:
-                state = "INTERCEPT"
-                committed_side = None
-                print(f"[coop {tag}] ball is mine — intercepting")
-
-        elif state == "INTERCEPT":
-            # Move toward where ball will be (predict 0.5s ahead)
+        # ══════════════════════════════════════════════════════
+        #  ACTIVE — striker-like kick logic (proven pattern)
+        #
+        #  Priority each tick:
+        #    1. SHOOT: close + aimed → kick + charge
+        #    2. KICK:  close + in front → dribble + align + kick
+        #    3. APPROACH: arc behind ball → drive toward ball
+        # ══════════════════════════════════════════════════════
+        elif mode == "active":
             if ball is None:
-                state = "IDLE"
+                mode = "home"
                 time.sleep(LOOP_RATE)
                 continue
 
-            # Predict ball position
-            if bspeed > 100:
-                target = predict_ball(ball, (bvx, bvy), 0.5)
-            else:
-                target = ball
-
-            vx, vy = _go_to(me, target, SPD_CRUISE, stop_r=20, ramp=500)
-            w = _face(me, ball)
-
-            # Ball stopped or very close → approach properly
-            if my_dist < CLOSE_R:
-                state = "APPROACH"
-                print(f"[coop {tag}] ball close — getting behind it")
-
-            # Ball went to mate → go back
-            if not ball_is_mine and my_dist > CLAIM_R * 0.8:
-                state = "IDLE"
+            # Ball went to mate? Give up and go home.
+            if my_dist > mate_dist + 200 and my_dist > CLAIM_DIST * 0.7:
+                mode = "retreat"
                 committed_side = None
-                print(f"[coop {tag}] ball went to mate — returning")
-
-        elif state == "APPROACH":
-            # Use arc navigation to get behind ball aimed at mate
-            if ball is None:
-                state = "IDLE"
+                near_ball_since = 0.0
+                print(f"[coop {tag}] ball went to mate — retreating")
                 time.sleep(LOOP_RATE)
                 continue
 
-            nav, committed_side, is_behind = compute_arc_nav(
-                robot_xy=(me[0], me[1]),
-                ball=ball,
-                aim=mate_pos,
-                behind_dist=BEHIND_DIST,
-                avoid_radius=AVOID_RADIUS,
-                committed_side=committed_side,
-            )
-
-            rel_nav = world2robot(me, nav)
-            d_nav = math.hypot(rel_nav[0], rel_nav[1])
             rel_ball = world2robot(me, ball)
             d_ball = math.hypot(rel_ball[0], rel_ball[1])
+            ang_ball = math.atan2(rel_ball[1], rel_ball[0])
 
-            if is_behind and d_ball < BALL_NEAR:
-                # Lined up behind ball — drive into it with dribbler
-                dribble = 1
-                vx, vy = move_toward(rel_ball, SPD_DRIBBLE,
-                                     ramp_dist=250, stop_dist=10)
-                # Face the mate (kick direction) not the ball
-                ang_to_mate = _ang_err(me, mate_pos)
-                w = clamp(ang_to_mate * TURN_GAIN * 0.7, -MAX_W, MAX_W)
+            rel_mate = world2robot(me, mate_pos)
+            ang_mate = math.atan2(rel_mate[1], rel_mate[0])
 
-                if d_ball < POSSESS_R:
-                    state = "POSSESS"
-                    possess_since = now
-                    print(f"[coop {tag}] ball on dribbler — aligning to mate")
-            else:
-                # Navigate toward arc waypoint
-                vx, vy = move_toward(rel_nav, SPD_CRUISE,
-                                     ramp_dist=400, stop_dist=10)
-                w = _face(me, ball)
+            kicked = False
 
-            # Ball escaped to mate
-            if not ball_is_mine and d_ball > CLAIM_R * 0.8:
-                state = "IDLE"
-                committed_side = None
-
-        elif state == "POSSESS":
-            # Ball on dribbler — turn to face mate, then kick
-            if ball is None:
-                state = "IDLE"
-                time.sleep(LOOP_RATE)
-                continue
-
-            dribble = 1
-            rel_ball = world2robot(me, ball)
-            d_ball = math.hypot(rel_ball[0], rel_ball[1])
-
-            # Ball escaped dribbler
-            if d_ball > POSSESS_R * 2:
-                state = "APPROACH"
-                committed_side = None
-                print(f"[coop {tag}] ball escaped — re-approaching")
-                time.sleep(LOOP_RATE)
-                continue
-
-            # Gentle forward pressure to keep ball on dribbler
-            vx = SPD_DRIBBLE * 0.3
-            vy = 0.0
-
-            # Turn toward mate — slow rotation to not lose ball
-            ang_to_mate = _ang_err(me, mate_pos)
-            w = clamp(ang_to_mate * TURN_GAIN * 0.5, -MAX_W * 0.5, MAX_W * 0.5)
-
-            # Check if aligned long enough and kick cooldown clear
-            aligned = abs(ang_to_mate) < KICK_ALIGN
-            held_long = (now - possess_since) > MIN_POSSESS_T
-            can_kick = (now - last_kick) > KICK_COOLDOWN
-
-            if aligned and held_long and can_kick:
-                # FIRE
+            # ── 1. SHOOT — ball in front, aimed at mate, kick now ──
+            if (d_ball < SHOOT_RANGE and rel_ball[0] > 0
+                    and abs(ang_mate) < SHOOT_ALIGN
+                    and (now - last_kick) > KICK_COOLDOWN):
                 kick = 1
                 dribble = 0
-                vx = SPD_CHARGE
-                vy = 0.0
+                # Charge forward into ball (stop_dist=0 → drive THROUGH)
+                vx, vy = move_toward(rel_ball, CHARGE_SPEED,
+                                     ramp_dist=100, stop_dist=0)
+                w = clamp(ang_mate * TURN_GAIN, -MAX_W, MAX_W)
                 last_kick = now
-                kick_burst_until = now + KICK_BURST_T
+                near_ball_since = 0.0
+                committed_side = None
+                kicked = True
+
+            # ── 2. KICK — ball close + in front, dribble & align ──
+            elif d_ball < KICK_RANGE and rel_ball[0] > 0:
+                dribble = 1
+                # Drive into ball with dribbler
+                vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
+                                     ramp_dist=150, stop_dist=10)
+                committed_side = None
+
+                # Rotate toward mate (the aim)
+                w = clamp(ang_mate * TURN_GAIN, -MAX_W, MAX_W)
+
+                # Track time near ball
+                if near_ball_since == 0.0:
+                    near_ball_since = now
+                force_kick = (now - near_ball_since) > FORCE_KICK_TIME
+
+                # Kick when aligned OR forced after timeout
+                if (now - last_kick) > KICK_COOLDOWN and (
+                        abs(ang_mate) < KICK_ALIGN_TOL or force_kick):
+                    kick = 1
+                    dribble = 0
+                    vx = DRIBBLE_SPD
+                    vy = 0.0
+                    last_kick = now
+                    near_ball_since = 0.0
+                    kicked = True
+
+            # ── 3. APPROACH — arc behind ball, drive toward it ─────
+            else:
+                near_ball_since = 0.0
+
+                # If ball is moving fast toward me, intercept it
+                if bspeed > 200:
+                    # Approach speed for ball → me
+                    dx = me[0] - ball[0]
+                    dy = me[1] - ball[1]
+                    dd = max(math.hypot(dx, dy), 1.0)
+                    approach_spd = (bvx * dx + bvy * dy) / dd
+
+                    if approach_spd > 150:
+                        # Ball coming toward me — predict intercept point
+                        t_arrive = max(dd / max(bspeed, 1.0), 0.1)
+                        intercept = predict_ball(
+                            ball, (bvx, bvy), min(t_arrive, 1.5))
+                        # Go to intercept, face ball, dribbler on
+                        dribble = 1
+                        vx, vy = _go_to(me, intercept, APPROACH_SPD,
+                                        stop_r=30, ramp=500)
+                        w = _face(me, ball)
+                    else:
+                        # Ball moving but not toward me — chase it
+                        nav, committed_side, is_behind = compute_arc_nav(
+                            robot_xy=(me[0], me[1]),
+                            ball=ball, aim=mate_pos,
+                            behind_dist=BEHIND_DIST,
+                            avoid_radius=AVOID_RADIUS,
+                            committed_side=committed_side)
+
+                        rel_nav = world2robot(me, nav)
+                        if is_behind and d_ball < BALL_NEAR:
+                            dribble = 1
+                            vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
+                                                 ramp_dist=300, stop_dist=10)
+                            w = clamp(ang_mate * TURN_GAIN * 0.7,
+                                      -MAX_W, MAX_W)
+                        else:
+                            vx, vy = move_toward(rel_nav, APPROACH_SPD,
+                                                 ramp_dist=400, stop_dist=10)
+                            w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+                else:
+                    # Ball is slow/stationary — standard arc approach
+                    nav, committed_side, is_behind = compute_arc_nav(
+                        robot_xy=(me[0], me[1]),
+                        ball=ball, aim=mate_pos,
+                        behind_dist=BEHIND_DIST,
+                        avoid_radius=AVOID_RADIUS,
+                        committed_side=committed_side)
+
+                    rel_nav = world2robot(me, nav)
+                    d_nav = math.hypot(rel_nav[0], rel_nav[1])
+
+                    if is_behind and d_nav < 300 and d_ball < BALL_NEAR:
+                        # Behind ball — drive into it with dribbler, face mate
+                        dribble = 1
+                        vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
+                                             ramp_dist=300, stop_dist=10)
+                        w = clamp(ang_mate * TURN_GAIN * 0.7,
+                                  -MAX_W, MAX_W)
+                    else:
+                        # Navigate to arc waypoint, face ball
+                        vx, vy = move_toward(rel_nav, APPROACH_SPD,
+                                             ramp_dist=400, stop_dist=10)
+                        w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+
+            # Always face ball when not dribbling/kicking
+            if kick == 0 and dribble == 0 and ball is not None:
+                ang_ball = math.atan2(rel_ball[1], rel_ball[0])
+                if abs(ang_ball) > 0.04:
+                    w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+
+            # After kicking → retreat home
+            if kicked:
                 pass_count += 1
                 print(f"[coop {tag}] PASS #{pass_count}!")
-                state = "RETREAT"
+                mode = "retreat"
 
-        elif state == "RETREAT":
-            # Go back to home
-            vx, vy = _go_to(me, home, SPD_CRUISE)
+        # ══════════════════════════════════════════════════════
+        #  RETREAT — go back home after kicking
+        # ══════════════════════════════════════════════════════
+        elif mode == "retreat":
+            vx, vy = _go_to(me, home, APPROACH_SPD)
             w = _face(me, mate_pos)
+
             if _at(me, home, 200):
-                state = "IDLE"
+                mode = "home"
                 committed_side = None
                 print(f"[coop {tag}] home — waiting")
 
-            # If ball bounced back to us before we got home, grab it
-            if ball is not None and ball_is_mine and my_dist < CLOSE_R:
-                state = "APPROACH"
-                committed_side = None
-
-        # ── Obstacle avoidance (only during movement) ────────
-        if state in ("INTERCEPT", "APPROACH", "RETREAT"):
+        # ── Obstacle avoidance (not while possessing ball) ───
+        if mode in ("active",) and dribble == 0 and kick == 0:
             target_for_avoid = ball if ball is not None else mate_pos
             rel_target = world2robot(me, target_for_avoid)
+            avoid_vx, avoid_vy, _, prev_obs_pos = _compute_avoidance(
+                me, frame, is_yellow, robot_id, rel_target, prev_obs_pos)
+            vx += avoid_vx
+            vy += avoid_vy
+        elif mode == "retreat":
+            rel_target = world2robot(me, mate_pos)
             avoid_vx, avoid_vy, _, prev_obs_pos = _compute_avoidance(
                 me, frame, is_yellow, robot_id, rel_target, prev_obs_pos)
             vx += avoid_vx
@@ -423,7 +433,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # ── Speed cap ────────────────────────────────────────
         spd = math.hypot(vx, vy)
-        max_spd = SPD_CHARGE if kick else SPD_CRUISE * 1.2
+        max_spd = CHARGE_SPEED if kick else APPROACH_SPD * 1.2
         if spd > max_spd:
             vx = vx / spd * max_spd
             vy = vy / spd * max_spd
