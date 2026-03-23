@@ -1,10 +1,13 @@
 """
-Cooperative pass-and-score — two robots pass side-to-side then score.
+1v1 Duel — two robots take turns shooting at each other's goals.
 
-Yellow (passer) starts bottom-left with the ball, passes sideways to
-Blue (scorer) positioned top-right. Blue receives and shoots at the +x goal.
+Each robot attacks the opponent's goal and defends its own.
+When the ball is on my side or coming at me, I save/intercept then
+counter-attack. When I kick, I retreat to defend while the opponent
+takes their turn.
 
-Both robots are on the same side of the field attacking the same goal.
+Yellow defends -x goal, attacks +x goal.
+Blue defends +x goal, attacks -x goal.
 
 Field is 4500 x 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -33,39 +36,35 @@ from TeamControl.robot.constants import (
 
 
 # =====================================================================
-#  LAYOUT — both attack the +x goal
+#  LAYOUT
 #
 #       y
 #    +1115 +----------------------------------------------+
-#          |                  [BLUE]                [GOAL] |
-#          |                 (0, 650)               (+x)  |
-#        0 |                                              |
-#          |  [YELLOW]                                    |
-#          | (-1400,-650)                                 |
+#          |                                              |
+#   [GOAL] |  [YELLOW]    <-- ball -->      [BLUE]  [GOAL]
+#    (-x)  | (-1500,0)                    (1500,0)   (+x)
+#          |                                              |
 #    -1115 +----------------------------------------------+
 #        -2250              0               +2250  x
 #
-#  1. Yellow picks up ball, passes sideways/diag to Blue
-#  2. Blue receives, shoots at +x goal
+#  Yellow: defends -x goal, shoots at +x goal
+#  Blue:   defends +x goal, shoots at -x goal
 # =====================================================================
 
-HOME_YELLOW     = (-1400, -650)
-HOME_BLUE       = (0, 650)
-BALL_START      = (-1100, -500)
-GOAL_TARGET     = (HALF_LEN, 0)
+HOME_YELLOW     = (-1500, 0)
+HOME_BLUE       = (1500, 0)
+BALL_START      = (0, 0)
 
 # -- Tuning ------------------------------------------------------------
-CLAIM_DIST      = 1800      # mm — ball within this = I go for it
+CLAIM_DIST      = 2000      # mm — ball within this = I go for it
 APPROACH_SPD    = CRUISE_SPEED
+SAVE_SPD        = CRUISE_SPEED * 0.9
 SETUP_PAUSE     = 2.0
+SAVE_X_OFFSET   = 400      # mm — how far in front of goal line to save
 
 # Exported for UI overlay
-ATK_START       = HOME_YELLOW
-SUP_START       = HOME_BLUE
-BALL_TRIGGER    = BALL_START
-BALL_TRIGGER_R  = CLAIM_DIST
-SUP_SHOOT_SPOT  = HOME_BLUE
-GOAL_X          = HALF_LEN
+GOAL_POS_X      = HALF_LEN
+GOAL_NEG_X      = -HALF_LEN
 
 
 # =====================================================================
@@ -102,38 +101,72 @@ def _at(me, target, radius):
     return _dist(me, target) < radius
 
 
+def _pick_goal_aim(ball, goal_x):
+    """Pick aim inside goal mouth — favor the side the ball is on."""
+    aim_inward = 1 if goal_x > 0 else -1
+    aim_x = goal_x + aim_inward * (GOAL_DEPTH * 0.4)
+    # Slight y offset to not hit dead center
+    if ball is not None:
+        aim_y = max(-GOAL_HW * 0.7, min(GOAL_HW * 0.7, ball[1] * 0.3))
+    else:
+        aim_y = 0.0
+    return (aim_x, aim_y)
+
+
+def _save_position(me, ball, bvx, bvy, bspeed, our_goal_x):
+    """
+    Compute where to stand to save a shot.
+    Positions on the goal line, predicting where ball will cross.
+    """
+    goal_sign = 1 if our_goal_x > 0 else -1
+    save_x = our_goal_x - goal_sign * SAVE_X_OFFSET
+
+    if ball is None:
+        return (save_x, 0.0)
+
+    # If ball is moving toward our goal, predict where it crosses
+    if bspeed > 100:
+        # Time for ball to reach goal line
+        dx_to_goal = our_goal_x - ball[0]
+        if abs(bvx) > 50 and (dx_to_goal * bvx > 0):  # ball moving toward goal
+            t_cross = dx_to_goal / bvx
+            if 0 < t_cross < 3.0:
+                pred = predict_ball(ball, (bvx, bvy), t_cross)
+                pred_y = max(-GOAL_HW * 0.9, min(GOAL_HW * 0.9, pred[1]))
+                return (save_x, pred_y)
+
+    # Default: track ball y position
+    track_y = max(-GOAL_HW * 0.8, min(GOAL_HW * 0.8, ball[1]))
+    return (save_x, track_y)
+
+
 # =====================================================================
 #  MAIN — one process per robot
 #
-#  Roles:
-#    passer (yellow) — pick up ball, pass sideways to scorer
-#    scorer (blue)   — receive pass, shoot at +x goal
-#
 #  Modes:
-#    setup   — teleport, place ball
-#    home    — wait at position, predict incoming ball, intercept
-#    active  — kick_engine: approach + align + burst
-#    retreat — go home after kicking (passer) or done (scorer)
-#    done    — hold position
+#    setup    — teleport, place ball
+#    defend   — stay near own goal, save shots, intercept
+#    attack   — kick engine drives toward opponent goal
+#    retreat  — go back to defend after kicking
 # =====================================================================
 
-def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
-             is_yellow=True, mate_is_yellow=None, attack_positive=None):
-    if mate_is_yellow is None:
-        mate_is_yellow = is_yellow
+def run_duel(is_running, dispatch_q, wm, robot_id, opponent_id,
+             is_yellow=True, opp_is_yellow=None):
+    if opp_is_yellow is None:
+        opp_is_yellow = not is_yellow
 
-    role = "passer" if is_yellow else "scorer"
     home = HOME_YELLOW if is_yellow else HOME_BLUE
-    home_ang = math.atan2(HOME_BLUE[1] - HOME_YELLOW[1],
-                          HOME_BLUE[0] - HOME_YELLOW[0]) if is_yellow \
-               else math.atan2(GOAL_TARGET[1] - HOME_BLUE[1],
-                               GOAL_TARGET[0] - HOME_BLUE[0])
+    home_ang = 0.0 if is_yellow else math.pi
+
+    # Yellow defends -x, attacks +x.  Blue is opposite.
+    our_goal_x = -HALF_LEN if is_yellow else HALF_LEN
+    opp_goal_x = HALF_LEN if is_yellow else -HALF_LEN
 
     sim = None
     try:
         sim = grSimSender("127.0.0.1", 20011)
     except Exception as e:
-        print(f"[coop] grSim sender failed: {e}")
+        print(f"[duel] grSim sender failed: {e}")
 
     # -- Teleport -------------------------------------------------------
     if sim:
@@ -145,10 +178,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             sim.send_packet(pkt)
             time.sleep(0.1)
         except Exception as e:
-            print(f"[coop] teleport failed: {e}")
+            print(f"[duel] teleport failed: {e}")
 
     tag = "yellow" if is_yellow else "blue"
-    print(f"[coop {tag}] role={role} home={home}")
+    print(f"[duel {tag}] home={home} defend={our_goal_x} attack={opp_goal_x}")
 
     # -- State ----------------------------------------------------------
     mode = "setup"
@@ -157,6 +190,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     prev_obs_pos = {}
     setup_time = time.time()
     ball_placed = False
+    shot_count = 0
 
     ball_history = []
     last_ball_xy = None
@@ -190,9 +224,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             bp = frame.ball.position
             ball = (float(bp[0]), float(bp[1]))
 
-        mate = _get_robot(frame, mate_is_yellow, teammate_id)
-        mate_pos = (mate[0], mate[1]) if mate is not None else \
-                   (HOME_BLUE if is_yellow else HOME_YELLOW)
+        opp = _get_robot(frame, opp_is_yellow, opponent_id)
+        opp_pos = (opp[0], opp[1]) if opp is not None else \
+                  (HOME_BLUE if is_yellow else HOME_YELLOW)
 
         # -- Ball velocity ----------------------------------------------
         if ball is not None:
@@ -202,10 +236,24 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # -- Distances --------------------------------------------------
         my_dist = _dist(ball, me[:2]) if ball else float('inf')
-        mate_dist = _dist(ball, mate_pos) if ball else float('inf')
+        opp_dist = _dist(ball, opp_pos) if ball else float('inf')
 
-        # -- Aim: passer -> mate, scorer -> goal -----------------------
-        aim = mate_pos if role == "passer" else GOAL_TARGET
+        # -- Which half is ball on? ------------------------------------
+        # Ball is "on my side" if it's closer to my goal than opponent's
+        ball_on_my_side = False
+        if ball is not None:
+            my_goal_dist = abs(ball[0] - our_goal_x)
+            opp_goal_dist = abs(ball[0] - opp_goal_x)
+            ball_on_my_side = my_goal_dist < opp_goal_dist
+
+        # -- Is ball heading toward my goal? ---------------------------
+        ball_toward_me = False
+        if ball is not None and bspeed > 100:
+            goal_sign = 1 if our_goal_x > 0 else -1
+            ball_toward_me = (bvx * goal_sign) > 80
+
+        # -- Aim target for shooting -----------------------------------
+        aim = _pick_goal_aim(ball, opp_goal_x)
 
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
@@ -215,7 +263,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         # ==============================================================
         if mode == "setup":
             vx, vy = _go_to(me, home, APPROACH_SPD)
-            w = _face(me, aim)
+            w = _face(me, opp_pos)
             if _at(me, home, 200) and (now - setup_time) > SETUP_PAUSE:
                 if is_yellow and not ball_placed and sim:
                     try:
@@ -224,67 +272,86 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                             y=BALL_START[1] / 1000.0,
                             vx=0.0, vy=0.0)
                         sim.send_packet(pkt)
-                        print(f"[coop yellow] ball placed at {BALL_START}")
+                        print(f"[duel yellow] ball placed at {BALL_START}")
                     except Exception:
                         pass
                     ball_placed = True
-                mode = "home"
-                print(f"[coop {tag}] ready — {role}")
+                mode = "defend"
+                print(f"[duel {tag}] ready — defending")
 
         # ==============================================================
-        #  HOME — wait at position, intercept incoming passes
+        #  DEFEND — position to save, intercept incoming balls
+        #
+        #  When ball is on my side or heading toward me:
+        #    - Position between ball and goal to save
+        #    - Intercept fast balls
+        #    - When I get the ball, switch to attack
         # ==============================================================
-        elif mode == "home":
+        elif mode == "defend":
             if ball is not None:
-                dx_to_me = me[0] - ball[0]
-                dy_to_me = me[1] - ball[1]
-                dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
-                approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
+                # Save position: between ball and our goal
+                save_pt = _save_position(me, ball, bvx, bvy, bspeed,
+                                         our_goal_x)
 
-                if bspeed > 150 and approach_spd > 100:
-                    # Ball coming toward me — predict intercept
-                    t_arrive = max(dd_to_me / max(bspeed, 1.0), 0.1)
+                # Ball coming fast toward my goal — move to intercept
+                if ball_toward_me and bspeed > 200:
+                    t_arrive = max(my_dist / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
                         ball, (bvx, bvy), min(t_arrive, 2.0))
+                    # Clamp intercept to stay near our goal
+                    goal_sign = 1 if our_goal_x > 0 else -1
+                    max_x = our_goal_x - goal_sign * 800
+                    if goal_sign > 0:
+                        ix = max(max_x, intercept[0])
+                    else:
+                        ix = min(max_x, intercept[0])
+                    iy = max(-HALF_WID + 100, min(HALF_WID - 100, intercept[1]))
                     dribble = 1
-                    vx, vy = _go_to(me, intercept, APPROACH_SPD,
+                    vx, vy = _go_to(me, (ix, iy), SAVE_SPD,
                                     stop_r=30, ramp=500)
                     w = _face(me, ball)
                 else:
-                    vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
+                    # Track ball from save position
+                    vx, vy = _go_to(me, save_pt, SAVE_SPD, stop_r=50)
                     w = _face(me, ball)
 
                 if my_dist < 600:
                     dribble = 1
 
-                # Ball is mine -> go active
-                if my_dist < CLAIM_DIST and my_dist < mate_dist - 100:
-                    mode = "active"
-                    ks.reset()
-                    action = "passing" if role == "passer" else "shooting"
-                    print(f"[coop {tag}] ball is mine — {action}")
+                # I have the ball or it's close and loose — attack!
+                if my_dist < CLAIM_DIST and my_dist < opp_dist - 100:
+                    if not ball_toward_me or my_dist < 400:
+                        mode = "attack"
+                        ks.reset()
+                        print(f"[duel {tag}] got the ball — attacking!")
             else:
                 vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
-                w = _face(me, aim)
+                w = _face(me, opp_pos)
 
         # ==============================================================
-        #  ACTIVE — kick engine handles approach + align + burst
-        #  aim = mate (passer) or goal (scorer)
+        #  ATTACK — kick engine aims at opponent's goal
         # ==============================================================
-        elif mode == "active":
+        elif mode == "attack":
             if ball is None:
-                mode = "home"
+                mode = "defend"
                 time.sleep(LOOP_RATE)
                 continue
 
-            # Passer: ball went to mate = pass delivered
-            if role == "passer":
-                if my_dist > mate_dist + 200 and my_dist > CLAIM_DIST * 0.7:
-                    mode = "retreat"
-                    ks.reset()
-                    print(f"[coop {tag}] pass delivered — retreating")
-                    time.sleep(LOOP_RATE)
-                    continue
+            # Lost possession — opponent got it or ball went far
+            if opp_dist < my_dist - 200 and my_dist > 500:
+                mode = "retreat"
+                ks.reset()
+                print(f"[duel {tag}] lost ball — retreating to defend")
+                time.sleep(LOOP_RATE)
+                continue
+
+            # Ball heading toward my goal — abandon attack, defend
+            if ball_toward_me and bspeed > 300 and my_dist > 600:
+                mode = "defend"
+                ks.reset()
+                print(f"[duel {tag}] ball heading to my goal — defending!")
+                time.sleep(LOOP_RATE)
+                continue
 
             rel_ball = world2robot(me, ball)
             d_ball = math.hypot(rel_ball[0], rel_ball[1])
@@ -294,8 +361,8 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 dx = me[0] - ball[0]
                 dy = me[1] - ball[1]
                 dd = max(math.hypot(dx, dy), 1.0)
-                approach_spd_val = (bvx * dx + bvy * dy) / dd
-                if approach_spd_val > 150 and d_ball > KICK_RANGE:
+                approach_val = (bvx * dx + bvy * dy) / dd
+                if approach_val > 150 and d_ball > KICK_RANGE:
                     t_arrive = max(dd / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
                         ball, (bvx, bvy), min(t_arrive, 1.5))
@@ -308,71 +375,57 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     vx, vy, w = kr.vx, kr.vy, kr.w
                     kick, dribble = kr.kick, kr.dribble
                     if kr.kick_started:
-                        action = "PASSING" if role == "passer" else "SHOOTING"
-                        print(f"[coop {tag}] {action}!")
+                        shot_count += 1
+                        print(f"[duel {tag}] SHOOTING #{shot_count}!")
                     if kr.burst_done:
-                        if role == "passer":
-                            mode = "retreat"
-                            ks.reset()
-                            print(f"[coop {tag}] pass done — retreating")
-                        else:
-                            mode = "done"
-                            ks.reset()
-                            print(f"[coop {tag}] GOAL!")
+                        mode = "retreat"
+                        ks.reset()
+                        print(f"[duel {tag}] shot done — retreating to defend")
             else:
                 kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
                 vx, vy, w = kr.vx, kr.vy, kr.w
                 kick, dribble = kr.kick, kr.dribble
                 if kr.kick_started:
-                    action = "PASSING" if role == "passer" else "SHOOTING"
-                    print(f"[coop {tag}] {action}!")
+                    shot_count += 1
+                    print(f"[duel {tag}] SHOOTING #{shot_count}!")
                 if kr.burst_done:
-                    if role == "passer":
-                        mode = "retreat"
-                        ks.reset()
-                        print(f"[coop {tag}] pass done — retreating")
-                    else:
-                        mode = "done"
-                        ks.reset()
-                        print(f"[coop {tag}] GOAL!")
+                    mode = "retreat"
+                    ks.reset()
+                    print(f"[duel {tag}] shot done — retreating to defend")
 
         # ==============================================================
-        #  RETREAT — passer goes home after passing
+        #  RETREAT — go back to defend after shooting
         # ==============================================================
         elif mode == "retreat":
-            if ball is not None and bspeed > 150:
-                dx_to_me = me[0] - ball[0]
-                dy_to_me = me[1] - ball[1]
-                dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
-                approach_spd_val = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
-                if approach_spd_val > 100:
-                    mode = "home"
-                    ks.reset()
-                    print(f"[coop {tag}] ball incoming — back to home")
-                    time.sleep(LOOP_RATE)
-                    continue
+            # Ball coming back — go defend immediately
+            if ball_toward_me and bspeed > 150:
+                mode = "defend"
+                ks.reset()
+                print(f"[duel {tag}] ball incoming — defending!")
+                time.sleep(LOOP_RATE)
+                continue
+
+            # Ball near me and loose — attack again
+            if ball is not None and my_dist < 500 and opp_dist > my_dist + 200:
+                mode = "attack"
+                ks.reset()
+                print(f"[duel {tag}] ball came back — attacking!")
+                time.sleep(LOOP_RATE)
+                continue
 
             vx, vy = _go_to(me, home, APPROACH_SPD)
-            w = _face(me, ball if ball is not None else aim)
+            w = _face(me, ball if ball is not None else opp_pos)
 
             if _at(me, home, 200):
-                mode = "done"
+                mode = "defend"
                 ks.reset()
-                print(f"[coop {tag}] home — done")
-
-        # ==============================================================
-        #  DONE — hold position
-        # ==============================================================
-        elif mode == "done":
-            vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
-            if ball is not None:
-                w = _face(me, ball)
-            else:
-                w = _face(me, aim)
+                print(f"[duel {tag}] home — defending")
 
         # -- Obstacle avoidance (all modes except kick burst) -----------
         if not ks.bursting:
-            if mode in ("home", "active"):
+            if mode == "defend":
+                target_for_avoid = ball if ball is not None else (our_goal_x, 0)
+            elif mode == "attack":
                 target_for_avoid = ball if ball is not None else aim
             else:
                 target_for_avoid = home
@@ -380,7 +433,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             avoid_vx, avoid_vy, closest_obs, prev_obs_pos = _compute_avoidance(
                 me, frame, is_yellow, robot_id, rel_target, prev_obs_pos)
 
-            if dribble == 1 and mode == "active":
+            if dribble == 1:
                 avoid_vx *= 0.4
                 avoid_vy *= 0.4
 

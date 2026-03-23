@@ -24,6 +24,7 @@ from TeamControl.robot.striker import run_striker
 from TeamControl.robot.navigator import run_navigator, WAYPOINTS_A, WAYPOINTS_B
 from TeamControl.robot.team import run_team
 from TeamControl.robot.coop import run_coop
+from TeamControl.robot.duel import run_duel
 
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
@@ -258,11 +259,13 @@ class SimEngine(QObject):
                                  args=(ev, dq, wm, opp_id, not preset.us_yellow),
                                  daemon=True))
         elif mode == "1v1":
-            procs.append(Process(target=run_striker,
-                                 args=(ev, dq, wm, our_id, True),
+            procs.append(Process(target=run_duel,
+                                 args=(ev, dq, wm, our_id, opp_id, True),
+                                 kwargs=dict(opp_is_yellow=False),
                                  daemon=True))
-            procs.append(Process(target=run_striker,
-                                 args=(ev, dq, wm, opp_id, False),
+            procs.append(Process(target=run_duel,
+                                 args=(ev, dq, wm, opp_id, our_id, False),
+                                 kwargs=dict(opp_is_yellow=True),
                                  daemon=True))
         elif mode == "obstacle":
             procs.append(Process(target=run_navigator,
