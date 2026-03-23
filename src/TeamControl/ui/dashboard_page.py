@@ -360,18 +360,15 @@ class DashboardPage(QWidget):
         # Show / hide coop overlay using existing targets + paths
         if mode == "coop":
             from TeamControl.robot.coop import (
-                ATK_START, SUP_START, BALL_TRIGGER, SUP_SHOOT_SPOT, GOAL_X,
+                HOME_YELLOW, HOME_BLUE, BALL_START,
             )
             self._field.set_targets([
-                (*ATK_START, YELLOW_TEAM),
-                (*SUP_START, BLUE_TEAM),
-                (*BALL_TRIGGER, BALL_COLOR),
-                (*SUP_SHOOT_SPOT, SUCCESS),
+                (*HOME_YELLOW, YELLOW_TEAM),
+                (*HOME_BLUE, BLUE_TEAM),
+                (*BALL_START, BALL_COLOR),
             ])
             self._field.set_paths([
-                ([BALL_TRIGGER, SUP_START], YELLOW_TEAM),
-                ([SUP_START, SUP_SHOOT_SPOT], BLUE_TEAM),
-                ([SUP_SHOOT_SPOT, (GOAL_X, 0)], SUCCESS),
+                ([HOME_YELLOW, HOME_BLUE], ACCENT),
             ])
         else:
             self._field.set_targets([])

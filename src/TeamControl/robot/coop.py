@@ -1,11 +1,11 @@
 """
-Cooperative set-piece — staged kick-pass and score for qualification video.
+Cooperative passing drill — two robots kick the ball back and forth.
 
-Fully automatic: robots teleport, ball auto-placed, then:
-  ATTACKER (yellow):  approach ball → align toward support → KICK pass
-  SUPPORT  (blue):    wait at mark → collect kicked ball → dribble → KICK to score
+Yellow stays in the left half, blue stays in the right half.
+Ball is auto-placed near yellow to start. Each robot:
+  WAIT → ball comes near → COLLECT → ALIGN toward mate → KICK → RETURN home → repeat
 
-Both passes use proper kick commands (each robot has its own 5s cooldown).
+Both robots run identical logic, just mirrored positions.
 
 Field is 4500 × 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -32,64 +32,55 @@ from TeamControl.robot.constants import (
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  PLAY GEOMETRY  (all mm)
+#  LAYOUT
 #
 #       y
 #    +1115 ┌──────────────────────────────────────┐
 #          │                                      │
-#     +550 │                [SUP]                 │
-#          │              (300,550)                │
-#          │            ↗                         │
-#          │         kick                [SHOOT]   │
-#          │       ↗                   (1800,150) │
-#        0 │ [ATK]···[BALL]·····················[GOAL]
-#          │(-1500,0)(-900,0)              +2250  │
+#          │                                      │
+#          │                                      │
+#        0 │    [YELLOW]  ←  ball  →   [BLUE]     │
+#          │   (-1000,0)    (start)   (1000,0)    │
+#          │                                      │
 #          │                                      │
 #    -1115 └──────────────────────────────────────┘
 #        -2250              0               +2250  x
 #
-#   Distance ball→support: ~1300mm (nice visible kick)
-#   Distance support→shoot: ~1550mm (clear dribble run)
-#   Distance shoot→goal: ~450mm (close range finish)
+#   ~2000mm between robots — nice visible kick distance
 # ═══════════════════════════════════════════════════════════════════
 
-# ── Ball ─────────────────────────────────────────────────────────
-BALL_TRIGGER    = (-900, 0)
-BALL_TRIGGER_R  = 300
+# Home positions — each robot stays in its own half
+HOME_YELLOW     = (-1000, 0)
+HOME_BLUE       = (1000, 0)
 
-# ── Goal ─────────────────────────────────────────────────────────
-GOAL_X          = HALF_LEN         # +2250
+# Ball starts near yellow
+BALL_START      = (-500, 0)
 
-# ── Attacker (yellow) ───────────────────────────────────────────
-ATK_START       = (-1500, 0)       # well behind ball
-ATK_START_ANG   = 0.0
+# How close ball must be to trigger collection
+RECEIVE_R       = 700
+# Ball trapped
+COLLECT_R       = 180
+# How close to home before considered "returned"
+HOME_R          = 200
 
-# ── Support (blue) ──────────────────────────────────────────────
-SUP_START       = (300, 550)       # far ahead and high — good pass distance
-SUP_START_ANG   = math.pi + 0.5   # facing back toward ball area
+# Kick alignment
+KICK_ALIGN_TOL  = 0.22             # rad
 
-SUP_RECEIVE_R   = 550              # ball "arrived" when this close
-SUP_COLLECT_R   = 180              # ball trapped
-
-# After collecting, dribble to shooting spot
-SUP_SHOOT_SPOT  = (1800, 150)      # close to goal, slightly above center
-SUP_SHOOT_R     = 200
-
-SUP_SHOOT_ALIGN = 0.22             # rad alignment tolerance
-FORCE_SHOOT_T   = 1.5              # force kick after this long at shoot spot
-
-# ── Speeds ──────────────────────────────────────────────────────
+# Speeds
 SPD_MOVE        = CRUISE_SPEED
 SPD_DRIBBLE     = DRIBBLE_SPEED
 SPD_CHARGE      = CHARGE_SPEED
 
-# ── Timing ──────────────────────────────────────────────────────
-SETUP_PAUSE     = 2.0              # seconds after teleport before ball placement
-BALL_SETTLE     = 0.5              # seconds after ball placement before play starts
+# Timing
+SETUP_PAUSE     = 2.0              # seconds before ball auto-placed
 
-# ── Kick approach ───────────────────────────────────────────────
-KICK_APPROACH_R = KICK_RANGE + 30  # get within this to start aligning
-KICK_ALIGN_TOL  = 0.20             # rad — how aligned before kicking
+# Exported for UI overlay
+ATK_START       = HOME_YELLOW
+SUP_START       = HOME_BLUE
+BALL_TRIGGER    = BALL_START
+BALL_TRIGGER_R  = RECEIVE_R
+SUP_SHOOT_SPOT  = HOME_BLUE        # reuse for overlay path endpoint
+GOAL_X          = HALF_LEN
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -136,13 +127,11 @@ def _at(me, target, radius):
 
 
 def _angle_err_to(me, target):
-    """Return signed angle error from robot heading to target, in radians."""
     rel = world2robot(me, target)
     return math.atan2(rel[1], rel[0])
 
 
-def _behind_ball_toward(ball, target, dist_behind=250):
-    """Point that is `dist_behind` mm behind `ball` on the line ball→target."""
+def _behind_ball_toward(ball, target, dist_behind=200):
     dx = target[0] - ball[0]
     dy = target[1] - ball[1]
     d = max(math.hypot(dx, dy), 1.0)
@@ -150,34 +139,8 @@ def _behind_ball_toward(ball, target, dist_behind=250):
     return (ball[0] - ux * dist_behind, ball[1] - uy * dist_behind)
 
 
-def _pick_goal_aim(frame, is_yellow):
-    """Aim at the far corner away from any goalie."""
-    aim_x = GOAL_X + GOAL_DEPTH * 0.3
-    opp_yellow = not is_yellow
-
-    gk_y = None
-    for oid in range(6):
-        try:
-            opp = frame.get_yellow_robots(isYellow=opp_yellow, robot_id=oid)
-            if isinstance(opp, int) or opp is None:
-                continue
-            op = opp.position
-            if abs(float(op[0]) - GOAL_X) < 400:
-                gk_y = float(op[1])
-                break
-        except Exception:
-            continue
-
-    if gk_y is not None:
-        aim_y = -GOAL_HW * 0.6 if gk_y > 0 else GOAL_HW * 0.6
-    else:
-        aim_y = -GOAL_HW * 0.4
-
-    return (aim_x, aim_y)
-
-
 # ═══════════════════════════════════════════════════════════════════
-#  MAIN — one process per robot
+#  MAIN — one process per robot, both run same logic
 # ═══════════════════════════════════════════════════════════════════
 
 def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
@@ -185,62 +148,52 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     if mate_is_yellow is None:
         mate_is_yellow = is_yellow
 
+    # Pick home position based on team
+    home = HOME_YELLOW if is_yellow else HOME_BLUE
+    home_ang = 0.0 if is_yellow else math.pi  # face toward center
+
     sim = None
     try:
         sim = grSimSender("127.0.0.1", 20011)
     except Exception as e:
         print(f"[coop] grSim sender failed: {e}")
 
-    # ── Teleport to starting marks ───────────────────────────
+    # ── Teleport to home ─────────────────────────────────────
     if sim:
         try:
-            if is_yellow:
-                pkt = grSimPacketFactory.robot_replacement_command(
-                    x=ATK_START[0] / 1000.0, y=ATK_START[1] / 1000.0,
-                    orientation=ATK_START_ANG,
-                    robot_id=robot_id, isYellow=True)
-            else:
-                pkt = grSimPacketFactory.robot_replacement_command(
-                    x=SUP_START[0] / 1000.0, y=SUP_START[1] / 1000.0,
-                    orientation=SUP_START_ANG,
-                    robot_id=robot_id, isYellow=False)
+            pkt = grSimPacketFactory.robot_replacement_command(
+                x=home[0] / 1000.0, y=home[1] / 1000.0,
+                orientation=home_ang,
+                robot_id=robot_id, isYellow=is_yellow)
             sim.send_packet(pkt)
             time.sleep(0.1)
         except Exception as e:
             print(f"[coop] teleport failed: {e}")
 
-    # ── Console info ─────────────────────────────────────────
     tag = "yellow" if is_yellow else "blue"
     print()
     print("=" * 55)
-    print("  COOP SET-PIECE — QUALIFICATION PLAY")
+    print("  COOP PASSING DRILL")
     print("=" * 55)
-    if is_yellow:
-        print(f"  Attacker (yellow #{robot_id}):  {ATK_START}")
-        print(f"  Support  (blue #{teammate_id}):   {SUP_START}")
-        print(f"  Ball auto-placed at:       {BALL_TRIGGER}")
-        print(f"  Shoot spot:                {SUP_SHOOT_SPOT}")
-        print(f"  Scoring on:                +x goal (x = {GOAL_X})")
-        print("-" * 55)
-        print(f"  Play auto-starts in ~{SETUP_PAUSE + BALL_SETTLE}s")
+    print(f"  Yellow home: {HOME_YELLOW}")
+    print(f"  Blue home:   {HOME_BLUE}")
+    print(f"  Ball start:  {BALL_START} (auto-placed)")
+    print(f"  Distance:    {_dist(HOME_YELLOW, HOME_BLUE):.0f} mm")
     print("=" * 55)
     print()
 
     # ── State machine ────────────────────────────────────────
-    if is_yellow:
-        state = "ATK_SETUP"
-    else:
-        state = "SUP_SETUP"
-
+    # States: SETUP → WAIT → COLLECT → ALIGN → KICK → RETURN → WAIT → ...
+    state = "SETUP"
     frame = None
     last_ft = 0.0
     last_kick = 0.0
     prev_obs_pos = {}
-    shoot_spot_since = 0.0
     setup_time = time.time()
-    ball_placed_time = 0.0
+    ball_placed = False
+    pass_count = 0
 
-    print(f"[coop {tag}] robot {robot_id} → {state}")
+    print(f"[coop {tag}] robot {robot_id} → SETUP")
 
     while is_running.is_set():
         now = time.time()
@@ -270,152 +223,109 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             ball = (float(bp[0]), float(bp[1]))
 
         mate = _get_robot(frame, mate_is_yellow, teammate_id)
+        mate_pos = (mate[0], mate[1]) if mate is not None else \
+                   (HOME_BLUE if is_yellow else HOME_YELLOW)
 
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
 
         # ══════════════════════════════════════════════════════
-        #  ATTACKER (yellow) — approach ball, align, kick-pass
-        # ══════════════════════════════════════════════════════
 
-        if state == "ATK_SETUP":
-            vx, vy = _go_to(me, ATK_START, SPD_MOVE)
-            w = _face(me, BALL_TRIGGER)
-            if _at(me, ATK_START, 120) and (now - setup_time) > SETUP_PAUSE:
-                if sim:
+        if state == "SETUP":
+            # Go to home, then yellow auto-places ball after pause
+            vx, vy = _go_to(me, home, SPD_MOVE)
+            w = _face_angle(me, home_ang)
+
+            if _at(me, home, HOME_R) and (now - setup_time) > SETUP_PAUSE:
+                # Only yellow places the ball
+                if is_yellow and not ball_placed and sim:
                     try:
                         pkt = grSimPacketFactory.ball_replacement_command(
-                            x=BALL_TRIGGER[0] / 1000.0,
-                            y=BALL_TRIGGER[1] / 1000.0,
+                            x=BALL_START[0] / 1000.0,
+                            y=BALL_START[1] / 1000.0,
                             vx=0.0, vy=0.0)
                         sim.send_packet(pkt)
-                        print("[coop yellow] ball placed — settling...")
-                    except Exception as e:
-                        print(f"[coop yellow] ball placement failed: {e}")
-                ball_placed_time = now
-                state = "ATK_WAIT_SETTLE"
+                        print("[coop yellow] ball placed")
+                    except Exception:
+                        pass
+                    ball_placed = True
 
-        elif state == "ATK_WAIT_SETTLE":
-            vx, vy = 0.0, 0.0
-            w = _face(me, BALL_TRIGGER)
-            if (now - ball_placed_time) > BALL_SETTLE:
-                state = "ATK_APPROACH"
-                print("[coop yellow] approaching ball")
+                state = "WAIT"
+                print(f"[coop {tag}] at home — waiting for ball")
 
-        elif state == "ATK_APPROACH":
-            # Drive to behind-ball position aimed at support
-            ball_pos = ball if ball is not None else BALL_TRIGGER
-            sup_pos = (mate[0], mate[1]) if mate is not None else SUP_START
-            behind = _behind_ball_toward(ball_pos, sup_pos, dist_behind=200)
-
-            vx, vy = _go_to(me, behind, SPD_MOVE, stop_r=20, ramp=300)
-            w = _face(me, sup_pos)
-
-            # Close enough and roughly aimed → start final alignment
-            if _at(me, behind, 120):
-                state = "ATK_ALIGN"
-                print("[coop yellow] behind ball — aligning for kick-pass")
-
-        elif state == "ATK_ALIGN":
-            # Creep toward ball with dribbler, rotate to face support
-            ball_pos = ball if ball is not None else BALL_TRIGGER
-            sup_pos = (mate[0], mate[1]) if mate is not None else SUP_START
-
-            dribble = 1
-            rel_ball = world2robot(me, ball_pos)
-            d_ball = math.hypot(rel_ball[0], rel_ball[1])
-            vx, vy = move_toward(rel_ball, SPD_DRIBBLE,
-                                 ramp_dist=200, stop_dist=10)
-            w = _face(me, sup_pos)
-
-            # Check alignment to support
-            ang_to_sup = _angle_err_to(me, sup_pos)
-
-            if d_ball < KICK_RANGE and abs(ang_to_sup) < KICK_ALIGN_TOL \
-               and (now - last_kick) > KICK_COOLDOWN:
-                kick = 1
-                dribble = 0
-                vx = SPD_CHARGE
-                vy = 0.0
-                last_kick = now
-                state = "ATK_DONE"
-                print("[coop yellow] KICK-PASS delivered!")
-
-        elif state == "ATK_DONE":
-            vx, vy, w = 0.0, 0.0, 0.0
-
-        # ══════════════════════════════════════════════════════
-        #  SUPPORT (blue) — wait, collect, dribble, kick-score
-        # ══════════════════════════════════════════════════════
-
-        elif state == "SUP_SETUP":
-            vx, vy = _go_to(me, SUP_START, SPD_MOVE)
-            w = _face_angle(me, SUP_START_ANG)
-            if _at(me, SUP_START, 120):
-                state = "SUP_WAIT"
-                print("[coop blue] at receive mark — waiting for pass")
-
-        elif state == "SUP_WAIT":
+        elif state == "WAIT":
+            # Stand at home, face the ball (or mate if no ball visible)
             vx, vy = 0.0, 0.0
             if ball is not None:
                 w = _face(me, ball)
             else:
-                w = _face(me, BALL_TRIGGER)
-            if ball is not None and _dist(ball, me) < SUP_RECEIVE_R:
-                state = "SUP_COLLECT"
-                print("[coop blue] ball incoming — collecting")
+                w = _face(me, mate_pos)
 
-        elif state == "SUP_COLLECT":
+            # Ball comes within receive range → go collect
+            if ball is not None and _dist(ball, me) < RECEIVE_R:
+                state = "COLLECT"
+                print(f"[coop {tag}] ball incoming — collecting")
+
+        elif state == "COLLECT":
+            # Approach ball with dribbler on
             if ball is None:
+                # Lost sight, go back to waiting
+                state = "WAIT"
                 time.sleep(LOOP_RATE)
                 continue
+
             rel_ball = world2robot(me, ball)
             d_ball = math.hypot(rel_ball[0], rel_ball[1])
             dribble = 1
             vx, vy = move_toward(rel_ball, SPD_DRIBBLE,
                                  ramp_dist=200, stop_dist=10)
             w = _face(me, ball)
-            if d_ball < SUP_COLLECT_R:
-                state = "SUP_DRIBBLE"
-                print("[coop blue] ball collected — dribbling to shoot spot")
 
-        elif state == "SUP_DRIBBLE":
+            if d_ball < COLLECT_R:
+                state = "ALIGN"
+                print(f"[coop {tag}] collected — aligning toward mate")
+
+        elif state == "ALIGN":
+            # Have ball, turn to face teammate
             dribble = 1
-            goal_aim = _pick_goal_aim(frame, is_yellow)
-            vx, vy = _go_to(me, SUP_SHOOT_SPOT, SPD_DRIBBLE, stop_r=30)
-            w = _face(me, goal_aim)
-            if _at(me, SUP_SHOOT_SPOT, SUP_SHOOT_R):
-                state = "SUP_SHOOT"
-                shoot_spot_since = now
-                print("[coop blue] at shoot spot — aligning for shot")
+            ball_pos = ball if ball is not None else me[:2]
+            rel_ball = world2robot(me, ball_pos)
+            vx, vy = move_toward(rel_ball, SPD_DRIBBLE * 0.5,
+                                 ramp_dist=100, stop_dist=10)
+            w = _face(me, mate_pos)
 
-        elif state == "SUP_SHOOT":
-            dribble = 1
-            vx, vy = 0.0, 0.0
-            goal_aim = _pick_goal_aim(frame, is_yellow)
-            rel_aim = world2robot(me, goal_aim)
-            ang_aim = math.atan2(rel_aim[1], rel_aim[0])
-            w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
+            ang_to_mate = _angle_err_to(me, mate_pos)
 
-            force = (now - shoot_spot_since) > FORCE_SHOOT_T
-
-            if (abs(ang_aim) < SUP_SHOOT_ALIGN or force) and \
+            # Aligned and cooldown elapsed → kick
+            if abs(ang_to_mate) < KICK_ALIGN_TOL and \
                (now - last_kick) > KICK_COOLDOWN:
-                kick = 1
-                dribble = 0
-                vx = SPD_CHARGE
-                vy = 0.0
-                last_kick = now
-                state = "SUP_DONE"
-                print("[coop blue] SHOT TAKEN — GOAL!")
+                state = "KICK"
+                print(f"[coop {tag}] aligned — kicking!")
 
-        elif state == "SUP_DONE":
-            vx, vy, w = 0.0, 0.0, 0.0
+        elif state == "KICK":
+            # Fire the kick
+            kick = 1
+            dribble = 0
+            vx = SPD_CHARGE
+            vy = 0.0
+            w = _face(me, mate_pos)
+            last_kick = now
+            pass_count += 1
+            print(f"[coop {tag}] PASS #{pass_count} sent!")
+            state = "RETURN"
 
-        # ── Obstacle avoidance (only while actively moving) ──
-        if state not in ("ATK_SETUP", "ATK_WAIT_SETTLE", "ATK_DONE",
-                         "SUP_SETUP", "SUP_WAIT", "SUP_DONE"):
-            target_for_avoid = ball if ball is not None else BALL_TRIGGER
+        elif state == "RETURN":
+            # Go back to home position
+            vx, vy = _go_to(me, home, SPD_MOVE)
+            w = _face(me, mate_pos)
+
+            if _at(me, home, HOME_R):
+                state = "WAIT"
+                print(f"[coop {tag}] back home — waiting")
+
+        # ── Obstacle avoidance (only while moving) ───────────
+        if state in ("COLLECT", "RETURN"):
+            target_for_avoid = ball if ball is not None else mate_pos
             rel_target = world2robot(me, target_for_avoid)
             avoid_vx, avoid_vy, _, prev_obs_pos = _compute_avoidance(
                 me, frame, is_yellow, robot_id, rel_target, prev_obs_pos)
