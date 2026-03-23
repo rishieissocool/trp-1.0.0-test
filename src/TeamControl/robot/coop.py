@@ -50,10 +50,11 @@ HOME_BLUE       = (1000, 0)
 BALL_START      = (-500, 0)
 
 # ── Tuning ──────────────────────────────────────────────────────
-KICK_ALIGN_TOL  = 0.20      # rad — alignment to fire kick
-FORCE_KICK_TIME = 0.8       # s — force kick after this long near ball
+KICK_ALIGN_TOL  = 0.22      # rad — alignment to fire kick
+FORCE_KICK_TIME = 1.0       # s — force kick after this long near ball
 CLAIM_DIST      = 1400      # mm — ball within this = I go for it
-KICK_BURST_T    = 0.30      # s — sustain kick=1 for this long to ensure grSim registers
+KICK_BURST_T    = 0.35      # s — sustain kick=1 for this long to ensure grSim registers
+CONTACT_DIST    = 130       # mm — ball touching dribbler/kicker (90 robot + 21 ball + margin)
 DRIBBLE_SPD     = DRIBBLE_SPEED
 APPROACH_SPD    = CRUISE_SPEED
 SETUP_PAUSE     = 2.0
@@ -252,11 +253,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         # ══════════════════════════════════════════════════════
         #  ACTIVE — get ball, align, trigger kick burst
         #
-        #  Behavior each tick (like striker):
-        #    1. Ball close + in front → dribble, align to mate,
-        #       trigger kick burst when aligned
-        #    2. Ball moving toward me → intercept
-        #    3. Otherwise → arc behind ball, drive into it
+        #  Priority each tick (like striker.py):
+        #    1. Ball touching dribbler + aligned → start kick burst
+        #    2. Ball in front + close → dribble, drive into it, align
+        #    3. Ball moving toward me fast → intercept
+        #    4. Otherwise → arc behind ball, drive into it
         # ══════════════════════════════════════════════════════
         elif mode == "active":
             if ball is None:
@@ -280,21 +281,18 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             rel_mate = world2robot(me, mate_pos)
             ang_mate = math.atan2(rel_mate[1], rel_mate[0])
 
-            # ── Ball close + in front → dribble, align, kick ──
-            if d_ball < KICK_RANGE and rel_ball[0] > 0:
+            # ── P1: Ball touching + aligned → KICK BURST ─────
+            if d_ball < CONTACT_DIST and rel_ball[0] > 0:
                 dribble = 1
-                # Drive gently into ball to keep contact
+                # Drive through ball to keep kicker contact
                 vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                     ramp_dist=150, stop_dist=0)
-                # Rotate toward mate
+                                     ramp_dist=100, stop_dist=0)
                 w = clamp(ang_mate * TURN_GAIN, -MAX_W, MAX_W)
 
-                # Track time near ball
                 if near_ball_since == 0.0:
                     near_ball_since = now
                 force_kick = (now - near_ball_since) > FORCE_KICK_TIME
 
-                # Aligned OR forced → start kick burst
                 can_kick = (now - last_kick) > KICK_COOLDOWN
                 if can_kick and (abs(ang_mate) < KICK_ALIGN_TOL or force_kick):
                     mode = "kicking"
@@ -305,15 +303,26 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     pass_count += 1
                     print(f"[coop {tag}] KICKING pass #{pass_count}!")
 
-            # ── Ball moving fast toward me → intercept ─────────
+            # ── P2: Ball close + in front → dribble, align ───
+            elif d_ball < KICK_RANGE and rel_ball[0] > 0:
+                dribble = 1
+                # Drive into ball — stop_dist=0 so we push through
+                vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
+                                     ramp_dist=150, stop_dist=0)
+                w = clamp(ang_mate * TURN_GAIN, -MAX_W, MAX_W)
+
+                if near_ball_since == 0.0:
+                    near_ball_since = now
+
+            # ── P3: Ball moving fast toward me → intercept ────
             elif bspeed > 200 and ball is not None:
+                near_ball_since = 0.0
                 dx = me[0] - ball[0]
                 dy = me[1] - ball[1]
                 dd = max(math.hypot(dx, dy), 1.0)
                 approach_spd = (bvx * dx + bvy * dy) / dd
 
                 if approach_spd > 150:
-                    # Ball coming at me — predict where it arrives
                     t_arrive = max(dd / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
                         ball, (bvx, bvy), min(t_arrive, 1.5))
@@ -322,7 +331,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                     stop_r=30, ramp=500)
                     w = _face(me, ball)
                 else:
-                    # Moving but not toward me — arc approach
                     nav, committed_side, is_behind = compute_arc_nav(
                         robot_xy=(me[0], me[1]),
                         ball=ball, aim=mate_pos,
@@ -333,7 +341,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     if is_behind and d_ball < BALL_NEAR:
                         dribble = 1
                         vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                             ramp_dist=300, stop_dist=10)
+                                             ramp_dist=300, stop_dist=0)
                         w = clamp(ang_mate * TURN_GAIN * 0.7,
                                   -MAX_W, MAX_W)
                     else:
@@ -341,7 +349,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                              ramp_dist=400, stop_dist=10)
                         w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
 
-            # ── Ball slow/stationary → arc behind, drive in ────
+            # ── P4: Ball slow/stationary → arc behind, drive ──
             else:
                 near_ball_since = 0.0
                 nav, committed_side, is_behind = compute_arc_nav(
@@ -355,36 +363,46 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
                 if is_behind and d_nav < 300 and d_ball < BALL_NEAR:
-                    # Behind ball — drive into it, face mate
                     dribble = 1
                     vx, vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                         ramp_dist=300, stop_dist=10)
+                                         ramp_dist=300, stop_dist=0)
                     w = clamp(ang_mate * TURN_GAIN * 0.7,
                               -MAX_W, MAX_W)
                 else:
-                    # Navigate to arc waypoint, face ball
                     vx, vy = move_toward(rel_nav, APPROACH_SPD,
                                          ramp_dist=400, stop_dist=10)
                     w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
 
-            # Always face ball when not dribbling
-            if dribble == 0 and kick == 0 and ball is not None:
+            # Face ball when not dribbling
+            if dribble == 0 and ball is not None:
                 if abs(ang_ball) > 0.04:
                     w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
 
         # ══════════════════════════════════════════════════════
-        #  KICKING — sustained kick=1 for KICK_BURST_T seconds
+        #  KICKING — sustained kick burst
         #
-        #  This is the KEY fix: grSim needs kick=1 on the exact
-        #  tick the ball touches the kicker. By sustaining kick
-        #  for ~0.3s while driving forward with dribbler holding
-        #  the ball, we guarantee the kick connects.
+        #  Drive toward ball with kick=1 + dribble=1 for
+        #  KICK_BURST_T seconds. The dribbler holds the ball
+        #  against the kicker face while kick fires every tick.
+        #  Only fires kick=1 when ball is actually close enough
+        #  to be in the kicker zone.
         # ══════════════════════════════════════════════════════
         elif mode == "kicking":
-            kick = 1
-            dribble = 1       # hold ball against kicker face
-            vx = CHARGE_SPEED  # drive forward through ball
-            vy = 0.0
+            if ball is not None:
+                rel_ball = world2robot(me, ball)
+                d_ball = math.hypot(rel_ball[0], rel_ball[1])
+                # Only fire kick when ball is in contact range
+                if d_ball < CONTACT_DIST + 30:
+                    kick = 1
+                dribble = 1
+                # Drive toward ball to maintain contact
+                vx, vy = move_toward(rel_ball, CHARGE_SPEED,
+                                     ramp_dist=100, stop_dist=0)
+            else:
+                kick = 1
+                dribble = 1
+                vx = CHARGE_SPEED
+                vy = 0.0
             w = _face(me, mate_pos)
 
             if now > kick_end_time:
