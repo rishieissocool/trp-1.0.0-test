@@ -1,14 +1,15 @@
 """
-Cooperative set-piece — fully scripted pass-and-score play.
+Cooperative set-piece — scripted pass-and-score play with smart targeting.
 
-Both bots teleport to fixed starting positions on the left-center of the field.
+Both bots teleport to fixed starting positions on the left side of the field.
 The play starts when you place the ball at the trigger spot and it stays
 there for 2 seconds.
 
-  ATTACKER (yellow):  go to ball → push it toward support → stop
+  ATTACKER (yellow):  go to ball → compute angle toward support → charge through ball
   SUPPORT  (blue):    park at receive spot → collect ball → dribble to goal → shoot
 
-Every position, speed, and threshold is hardcoded.  Nothing is dynamic.
+Positions are hardcoded starting marks.  Angles and charge targets are
+computed dynamically from actual robot positions each tick.
 
 Field is 4500 × 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -44,11 +45,11 @@ from TeamControl.robot.constants import (
 #       y
 #    +1115 ┌──────────────────────────────────────┐
 #          │                                      │
-#     +500 │          [SUP]                       │
-#          │          (200, 500)                   │
-#        0 │   [ATK]·····[BALL]···············[GOAL]
-#          │  (-800,0)  (-400,0)             +2250│
-#     -500 │                                      │
+#     +400 │       [SUP]                          │
+#          │      (-400, 400)                     │
+#        0 │  [ATK]·····[BALL]···············[GOAL]
+#          │(-1200,0) (-700,0)              +2250│
+#     -400 │                                      │
 #          │                                      │
 #    -1115 └──────────────────────────────────────┘
 #        -2250              0               +2250  x
@@ -56,7 +57,7 @@ from TeamControl.robot.constants import (
 # ═══════════════════════════════════════════════════════════════════
 
 # Where the ball must be placed to trigger the play
-BALL_TRIGGER    = (-400, 0)
+BALL_TRIGGER    = (-700, 0)
 BALL_TRIGGER_R  = 300        # mm — ball must be within this radius
 BALL_STABLE_T   = 2.0        # seconds — ball must stay in zone for this long
 
@@ -64,33 +65,25 @@ BALL_STABLE_T   = 2.0        # seconds — ball must stay in zone for this long
 GOAL_X          = HALF_LEN   # +2250
 
 # ── Attacker (yellow) ────────────────────────────────────────────
-ATK_START       = (-800, -100)    # starting mark — behind ball, slightly below
-ATK_START_ANG   = 0.0             # facing right
+ATK_START       = (-1200, -100)    # starting mark — behind ball, slightly below
+ATK_START_ANG   = 0.0              # facing right
 
-# Lineup: behind ball on the line toward support
-ATK_LINEUP      = (-600, -50)     # just behind and below the ball
-ATK_LINEUP_ANG  = 0.46            # ~26° — aimed at support through ball
-
-# Charge target: overshoot past ball toward support's position
-ATK_CHARGE_TGT  = (400, 600)
-ATK_CHARGE_SPD  = SPRINT_SPEED
-
-ATK_ARRIVE_R    = 120             # mm — close enough to lineup point
+ATK_ARRIVE_R    = 120              # mm — close enough to lineup point
 
 # ── Support (blue) ───────────────────────────────────────────────
-SUP_START       = (200, 500)      # receiving mark — ahead, offset up
-SUP_START_ANG   = math.pi + 0.4  # ~207° — facing back toward ball
+SUP_START       = (-400, 400)      # receiving mark — ahead, offset up
+SUP_START_ANG   = math.pi + 0.4   # ~207° — facing back toward ball
 
-SUP_RECEIVE_R   = 450             # mm — ball is "arrived" when this close
-SUP_COLLECT_R   = 180             # mm — ball is collected (trapped)
+SUP_RECEIVE_R   = 450              # mm — ball is "arrived" when this close
+SUP_COLLECT_R   = 180              # mm — ball is collected (trapped)
 
 # After collecting, dribble to this shooting spot
-SUP_SHOOT_SPOT  = (1500, 200)     # centered-ish in front of goal
-SUP_SHOOT_R     = 250             # mm — close enough to shooting spot
+SUP_SHOOT_SPOT  = (1500, 200)      # centered-ish in front of goal
+SUP_SHOOT_R     = 250              # mm — close enough to shooting spot
 
 # Aim inside the goal
 SUP_GOAL_AIM    = (GOAL_X + GOAL_DEPTH * 0.3, -GOAL_HW * 0.35)
-SUP_SHOOT_ALIGN = 0.25            # rad — alignment to fire
+SUP_SHOOT_ALIGN = 0.25             # rad — alignment to fire
 
 # Speeds
 SPD_MOVE        = CRUISE_SPEED
@@ -98,7 +91,7 @@ SPD_DRIBBLE     = DRIBBLE_SPEED
 SPD_CHARGE      = CHARGE_SPEED
 SPD_SPRINT      = SPRINT_SPEED
 
-FORCE_SHOOT_T   = 1.5             # seconds — force kick after this long at shoot spot
+FORCE_SHOOT_T   = 1.5              # seconds — force kick after this long at shoot spot
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -142,6 +135,57 @@ def _face_angle(me, desired_angle):
 
 def _at(me, target, radius):
     return _dist(me, target) < radius
+
+
+def _compute_lineup_and_charge(ball, support_pos):
+    """Dynamically compute the attacker's lineup point and charge target
+    based on where the ball and support actually are."""
+    bx, by = ball[0], ball[1]
+    sx, sy = support_pos[0], support_pos[1]
+
+    # Direction from ball toward support
+    dx = sx - bx
+    dy = sy - by
+    d = math.hypot(dx, dy)
+    if d < 1:
+        dx, dy = 1.0, 0.0
+        d = 1.0
+    ux, uy = dx / d, dy / d
+
+    # Lineup: 200mm behind the ball (opposite side from support)
+    lineup = (bx - ux * 200, by - uy * 200)
+    lineup_ang = math.atan2(uy, ux)
+
+    # Charge target: 400mm past the support (overshoot)
+    charge_tgt = (sx + ux * 400, sy + uy * 400)
+
+    return lineup, lineup_ang, charge_tgt
+
+
+def _pick_goal_aim(frame, is_yellow):
+    """Pick a goal aim point, preferring the side away from any goalie."""
+    aim_x = GOAL_X + GOAL_DEPTH * 0.3
+    opp_yellow = not is_yellow
+
+    gk_y = None
+    for oid in range(6):
+        try:
+            opp = frame.get_yellow_robots(isYellow=opp_yellow, robot_id=oid)
+            if isinstance(opp, int) or opp is None:
+                continue
+            op = opp.position
+            if abs(float(op[0]) - GOAL_X) < 400:
+                gk_y = float(op[1])
+                break
+        except Exception:
+            continue
+
+    if gk_y is not None:
+        aim_y = -GOAL_HW * 0.6 if gk_y > 0 else GOAL_HW * 0.6
+    else:
+        aim_y = -GOAL_HW * 0.35
+
+    return (aim_x, aim_y)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -234,6 +278,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             bp = frame.ball.position
             ball = (float(bp[0]), float(bp[1]))
 
+        # Get teammate position for dynamic computations
+        mate = _get_robot(frame, mate_is_yellow, teammate_id)
+
         # ── Track ball stability in trigger zone ─────────────
         if ball is not None and _dist(ball, BALL_TRIGGER) < BALL_TRIGGER_R:
             if ball_in_zone_since == 0.0:
@@ -270,17 +317,27 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 print("[coop yellow] ball stable — lining up for pass")
 
         elif state == "ATK_LINEUP":
-            vx, vy = _go_to(me, ATK_LINEUP, SPD_MOVE, stop_r=30)
-            w = _face_angle(me, ATK_LINEUP_ANG)
-            if _at(me, ATK_LINEUP, ATK_ARRIVE_R):
+            # Compute lineup dynamically from ball and support positions
+            ball_pos = ball if ball is not None else BALL_TRIGGER
+            sup_pos = (mate[0], mate[1]) if mate is not None else SUP_START
+            lineup, lineup_ang, _ = _compute_lineup_and_charge(ball_pos, sup_pos)
+
+            vx, vy = _go_to(me, lineup, SPD_MOVE, stop_r=30)
+            w = _face_angle(me, lineup_ang)
+            if _at(me, lineup, ATK_ARRIVE_R):
                 state = "ATK_CHARGE"
                 print("[coop yellow] lined up — CHARGING through ball")
 
         elif state == "ATK_CHARGE":
-            rel_tgt = world2robot(me, ATK_CHARGE_TGT)
-            vx, vy = move_toward(rel_tgt, ATK_CHARGE_SPD,
+            # Compute charge target dynamically
+            ball_pos = ball if ball is not None else BALL_TRIGGER
+            sup_pos = (mate[0], mate[1]) if mate is not None else SUP_START
+            _, _, charge_tgt = _compute_lineup_and_charge(ball_pos, sup_pos)
+
+            rel_tgt = world2robot(me, charge_tgt)
+            vx, vy = move_toward(rel_tgt, SPD_SPRINT,
                                  ramp_dist=50, stop_dist=0)
-            w = _face(me, ATK_CHARGE_TGT)
+            w = _face(me, charge_tgt)
             # Stop once we've cleared the ball trigger area
             if _dist(me, BALL_TRIGGER) > 500:
                 state = "ATK_DONE"
@@ -324,8 +381,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         elif state == "SUP_DRIBBLE_TO_GOAL":
             dribble = 1
+            # Dynamically pick goal aim based on goalie position
+            goal_aim = _pick_goal_aim(frame, is_yellow)
             vx, vy = _go_to(me, SUP_SHOOT_SPOT, SPD_DRIBBLE, stop_r=30)
-            w = _face(me, SUP_GOAL_AIM)
+            w = _face(me, goal_aim)
             if _at(me, SUP_SHOOT_SPOT, SUP_SHOOT_R):
                 state = "SUP_SHOOT"
                 shoot_spot_since = now
@@ -334,7 +393,8 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         elif state == "SUP_SHOOT":
             dribble = 1
             vx, vy = 0.0, 0.0
-            rel_aim = world2robot(me, SUP_GOAL_AIM)
+            goal_aim = _pick_goal_aim(frame, is_yellow)
+            rel_aim = world2robot(me, goal_aim)
             ang_aim = math.atan2(rel_aim[1], rel_aim[0])
             w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
 

@@ -357,6 +357,24 @@ class DashboardPage(QWidget):
         self._cal_card.setVisible(show_cal)
         if show_cal:
             self._load_cal_values()
+        # Show / hide coop overlay
+        if mode == "coop":
+            from TeamControl.robot.coop import (
+                ATK_START, SUP_START, BALL_TRIGGER, BALL_TRIGGER_R,
+                SUP_SHOOT_SPOT, SUP_GOAL_AIM, GOAL_X,
+            )
+            self._field.set_coop_overlay({
+                "atk_start": ATK_START,
+                "sup_start": SUP_START,
+                "ball_trigger": BALL_TRIGGER,
+                "ball_trigger_r": BALL_TRIGGER_R,
+                "shoot_spot": SUP_SHOOT_SPOT,
+                "goal_aim": SUP_GOAL_AIM,
+                "pass_line": [BALL_TRIGGER, SUP_START],
+                "shoot_line": [SUP_SHOOT_SPOT, (GOAL_X, 0)],
+            })
+        else:
+            self._field.set_coop_overlay(None)
 
     def set_engine_running(self, running):
         self._vis_dot.set_ok(running)

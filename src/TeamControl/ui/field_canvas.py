@@ -48,6 +48,7 @@ class FieldCanvas(QWidget):
         self._ball = None
         self._targets: list[tuple] = []
         self._paths: list[list[tuple]] = []
+        self._coop_overlay: dict | None = None
         self._frame_number = 0
 
         # View transform
@@ -74,6 +75,14 @@ class FieldCanvas(QWidget):
 
     def set_paths(self, paths):
         self._paths = list(paths)
+        self.update()
+
+    def set_coop_overlay(self, overlay: dict | None):
+        """Set coop set-piece overlay. Dict keys:
+        atk_start, sup_start, ball_trigger, ball_trigger_r,
+        shoot_spot, goal_aim, pass_line, shoot_line
+        """
+        self._coop_overlay = overlay
         self.update()
 
     def set_place_mode(self, mode):
@@ -116,6 +125,7 @@ class FieldCanvas(QWidget):
 
         p.setTransform(self._view_transform())
         self._draw_field(p)
+        self._draw_coop_overlay(p)
         self._draw_targets(p)
         self._draw_paths(p)
         self._draw_robots(p, self._yellow, QColor(YELLOW_TEAM))
@@ -217,6 +227,85 @@ class FieldCanvas(QWidget):
         p.setPen(QPen(QColor("#000000"), 8))
         p.setBrush(QBrush(QColor(BALL_COLOR)))
         p.drawEllipse(QPointF(bx, by), 45, 45)
+
+    def _draw_coop_overlay(self, p: QPainter):
+        ov = self._coop_overlay
+        if not ov:
+            return
+
+        label_font = QFont("Segoe UI", 1)
+        label_font.setPixelSize(70)
+        label_font.setBold(True)
+
+        # Ball trigger zone — dashed circle
+        if "ball_trigger" in ov and "ball_trigger_r" in ov:
+            bx, by = ov["ball_trigger"]
+            br = ov["ball_trigger_r"]
+            pen = QPen(QColor(BALL_COLOR), 12, Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(bx, by), br, br)
+            # Label
+            p.setPen(QColor(BALL_COLOR))
+            p.setFont(label_font)
+            p.drawText(QPointF(bx - 120, by - br - 30), "BALL")
+
+        # Attacker mark — yellow X with label
+        if "atk_start" in ov:
+            ax, ay = ov["atk_start"]
+            p.setPen(QPen(QColor(YELLOW_TEAM), 16))
+            p.setBrush(Qt.NoBrush)
+            sz = 70
+            p.drawLine(QPointF(ax - sz, ay - sz), QPointF(ax + sz, ay + sz))
+            p.drawLine(QPointF(ax - sz, ay + sz), QPointF(ax + sz, ay - sz))
+            p.setFont(label_font)
+            p.drawText(QPointF(ax - 60, ay - sz - 20), "ATK")
+
+        # Support mark — blue X with label
+        if "sup_start" in ov:
+            sx, sy = ov["sup_start"]
+            p.setPen(QPen(QColor(BLUE_TEAM), 16))
+            p.setBrush(Qt.NoBrush)
+            sz = 70
+            p.drawLine(QPointF(sx - sz, sy - sz), QPointF(sx + sz, sy + sz))
+            p.drawLine(QPointF(sx - sz, sy + sz), QPointF(sx + sz, sy - sz))
+            p.setFont(label_font)
+            p.drawText(QPointF(sx - 60, sy - sz - 20), "SUP")
+
+        # Shoot spot — green diamond
+        if "shoot_spot" in ov:
+            sx, sy = ov["shoot_spot"]
+            p.setPen(QPen(QColor(SUCCESS), 14))
+            p.setBrush(Qt.NoBrush)
+            d = 60
+            path = QPainterPath()
+            path.moveTo(sx, sy + d)
+            path.lineTo(sx + d, sy)
+            path.lineTo(sx, sy - d)
+            path.lineTo(sx - d, sy)
+            path.closeSubpath()
+            p.drawPath(path)
+            p.setFont(label_font)
+            p.setPen(QColor(SUCCESS))
+            p.drawText(QPointF(sx - 80, sy - d - 20), "SHOOT")
+
+        # Pass line — yellow dashed arrow from ball trigger to support
+        if "pass_line" in ov:
+            pts = ov["pass_line"]
+            if len(pts) >= 2:
+                pen = QPen(QColor(YELLOW_TEAM), 10, Qt.DashDotLine)
+                p.setPen(pen)
+                for i in range(len(pts) - 1):
+                    p.drawLine(QPointF(*pts[i]), QPointF(*pts[i + 1]))
+
+        # Shoot line — green dashed arrow from shoot spot to goal
+        if "shoot_line" in ov:
+            pts = ov["shoot_line"]
+            if len(pts) >= 2:
+                pen = QPen(QColor(SUCCESS), 10, Qt.DashLine)
+                p.setPen(pen)
+                for i in range(len(pts) - 1):
+                    p.drawLine(QPointF(*pts[i]), QPointF(*pts[i + 1]))
 
     def _draw_targets(self, p: QPainter):
         if not self._targets:
