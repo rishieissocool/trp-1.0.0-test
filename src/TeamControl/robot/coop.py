@@ -1,10 +1,11 @@
 """
-Cooperative goal scoring — dynamic two-robot teamwork.
+Cooperative goal scoring — two-robot teamwork.
 
-No fixed paths or scripted roles. Each tick the robot closest to the ball
-becomes the *carrier*; the other becomes *support* and positions dynamically
-ahead of play. The carrier shoots when close to goal, otherwise passes to
-the support. After a goal the ball resets and the play loops continuously.
+Only two robots participate: robot_id and teammate_id. Every other robot
+on the field (even same colour) is treated as an obstacle — never a pass
+target. The carrier kicks to the teammate or shoots at goal. The support
+goes to a planned receiving position, stops, faces the ball, and waits
+for the pass.  Positions only update when the ball moves significantly.
 
 Both robots attack the +x goal.
 Field is 4500 x 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
@@ -19,7 +20,6 @@ from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
     ball_velocity, update_ball_history, predict_ball,
 )
-from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
 from TeamControl.robot.diamond_nav import DiamondNav
 from TeamControl.network.ssl_sockets import grSimSender
@@ -34,7 +34,7 @@ from TeamControl.robot.constants import (
 )
 
 
-# Starting positions (setup + reset only — play is fully dynamic)
+# Starting positions (setup + reset only)
 HOME_YELLOW     = (-1500, -500)
 HOME_BLUE       = (-1500,  500)
 BALL_START      = (-1300,    0)
@@ -55,6 +55,8 @@ SUP_ADVANCE_MIN  = 500
 SUP_ADVANCE_MAX  = 1500
 SUP_LATERAL      = 550     # mm lateral offset from carrier side
 LANE_CLEARANCE   = 250     # mm obstacle clearance for pass/shot lane
+SUP_REPLAN_DIST  = 400     # mm — only replan support position when ball moves this far
+SUP_STOP_DIST    = 80      # mm — stop moving when this close to target position
 
 # Exported for UI overlay
 ATK_START       = HOME_YELLOW
@@ -98,14 +100,8 @@ def _at(me, target, radius):
     return _dist(me, target) < radius
 
 
-def _support_pos(ball, mate_pos):
-    """Dynamic support position: ahead of ball, laterally offset from carrier.
-
-    The support goes to the *opposite* side of the carrier relative to the
-    ball so there is always a clear passing angle.  The advance toward goal
-    scales with remaining distance so the support is always between ball and
-    goal — never behind the play.
-    """
+def _support_pos(ball, carrier_pos):
+    """Compute a receiving position ahead of ball, laterally offset."""
     bx, by = ball
     remaining = HALF_LEN - bx
     advance = clamp(remaining * SUP_ADVANCE_FRAC,
@@ -113,10 +109,10 @@ def _support_pos(ball, mate_pos):
     target_x = bx + advance
 
     # Offset to opposite side of carrier to create passing angle
-    if mate_pos[1] >= by:
-        target_y = by - SUP_LATERAL   # carrier above ball → go below
+    if carrier_pos[1] >= by:
+        target_y = by - SUP_LATERAL
     else:
-        target_y = by + SUP_LATERAL   # carrier below ball → go above
+        target_y = by + SUP_LATERAL
 
     target_x = clamp(target_x, -HALF_LEN + 300, HALF_LEN - 500)
     target_y = clamp(target_y, -HALF_WID + 200, HALF_WID - 200)
@@ -124,7 +120,7 @@ def _support_pos(ball, mate_pos):
 
 
 def _get_obstacles(frame, my_yellow, my_id, mate_yellow, mate_id):
-    """Positions of every robot on the field except me and my teammate."""
+    """Positions of every robot except me and my teammate."""
     obs = []
     for is_y in (True, False):
         for rid in range(6):
@@ -165,14 +161,67 @@ def _pick_goal_aim(me):
     return (HALF_LEN, offset)
 
 
+def _coop_avoidance(me, frame, is_yellow, robot_id, mate_is_yellow,
+                     mate_id, rel_target):
+    """Obstacle avoidance that skips the teammate — only avoids everyone else.
+
+    Returns (avoid_vx, avoid_vy, closest_obs_dist).
+    """
+    AVOID_DIST = 550
+    AVOID_CRITICAL = 260
+    AVOID_STRENGTH = 2.5
+    TANGENT_RATIO = 0.3
+
+    avoid_vx, avoid_vy = 0.0, 0.0
+    closest_obs = 9999.0
+
+    for color in (True, False):
+        for oid in range(16):
+            # Skip myself
+            if color == is_yellow and oid == robot_id:
+                continue
+            # Skip my teammate
+            if color == mate_is_yellow and oid == mate_id:
+                continue
+            try:
+                other = frame.get_yellow_robots(isYellow=color, robot_id=oid)
+                if isinstance(other, int) or other is None:
+                    continue
+                op = other.position
+                ox, oy = float(op[0]), float(op[1])
+
+                rel_obs = world2robot(me, (ox, oy))
+                d_obs = math.hypot(rel_obs[0], rel_obs[1])
+
+                if d_obs < closest_obs:
+                    closest_obs = d_obs
+
+                if d_obs >= AVOID_DIST:
+                    continue
+                if d_obs <= AVOID_CRITICAL:
+                    strength = AVOID_STRENGTH
+                else:
+                    t = (AVOID_DIST - d_obs) / (AVOID_DIST - AVOID_CRITICAL)
+                    strength = AVOID_STRENGTH * 0.5 * (1.0 - math.cos(math.pi * t))
+
+                if strength > 0.001 and d_obs > 1:
+                    inv_d = 1.0 / d_obs
+                    rep_x = -rel_obs[0] * inv_d * strength
+                    rep_y = -rel_obs[1] * inv_d * strength
+                    tang_x = rel_obs[1] * inv_d
+                    tang_y = -rel_obs[0] * inv_d
+                    if tang_x * rel_target[0] + tang_y * rel_target[1] < 0:
+                        tang_x, tang_y = -tang_x, -tang_y
+                    avoid_vx += rep_x + tang_x * strength * TANGENT_RATIO
+                    avoid_vy += rep_y + tang_y * strength * TANGENT_RATIO
+            except Exception:
+                continue
+
+    return avoid_vx, avoid_vy, closest_obs
+
+
 # =====================================================================
-#  MAIN — one process per robot, continuous dynamic play
-#
-#  Modes:  setup → play (loops) → reset → play → …
-#
-#  In *play* each tick determines the role from ball proximity:
-#    carrier — closest to ball, uses kick_engine to pass or shoot
-#    support — positions ahead dynamically, intercepts incoming passes
+#  MAIN
 # =====================================================================
 
 def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
@@ -211,7 +260,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     my_role = "carrier" if is_yellow else "support"
     frame = None
     last_ft = 0.0
-    prev_obs_pos = {}
     setup_time = time.time()
     ball_placed = False
     cycle_start = time.time()
@@ -222,6 +270,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     last_ball_xy = None
     ks = KickState()
     dnav = DiamondNav()
+
+    # Support position planning — only update when ball moves enough
+    sup_planned_pos = None       # the locked-in support position
+    sup_last_ball = None         # ball position when we last planned
 
     while is_running.is_set():
         now = time.time()
@@ -275,6 +327,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 mode = "reset"
                 reset_time = now
                 ks.reset()
+                sup_planned_pos = None
 
         # -- Cycle timeout → reset -------------------------------------
         if mode == "play" and (now - cycle_start) > CYCLE_TIMEOUT:
@@ -282,20 +335,24 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             mode = "reset"
             reset_time = now
             ks.reset()
+            sup_planned_pos = None
 
         # -- Role determination (play mode only) ------------------------
         if mode == "play" and ball is not None:
             if ks.bursting:
-                pass                                    # finish the kick
+                pass
             elif my_dist < mate_dist - CARRIER_MARGIN:
                 if my_role != "carrier":
                     my_role = "carrier"
                     ks.reset()
+                    sup_planned_pos = None
+                    dnav.clear()
                     print(f"[coop {tag}] -> carrier")
             elif mate_dist < my_dist - CARRIER_MARGIN:
                 if my_role != "support":
                     my_role = "support"
                     ks.reset()
+                    dnav.clear()
                     print(f"[coop {tag}] -> support")
 
         # ==============================================================
@@ -320,19 +377,21 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     ball_placed = True
                 mode = "play"
                 cycle_start = now
+                dnav.clear()
                 print(f"[coop {tag}] play!")
 
         # ==============================================================
-        #  PLAY — dynamic carrier / support
+        #  PLAY — carrier / support
         # ==============================================================
         elif mode == "play":
             if ball is None:
-                # No ball visible — hold near home
                 vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
                 w = _face(me, GOAL_TARGET)
 
             # ----------------------------------------------------------
             #  CARRIER — approach ball, decide shoot / pass / dribble
+            #
+            #  Only passes to teammate_id. All other robots are obstacles.
             # ----------------------------------------------------------
             elif my_role == "carrier":
                 obstacles = _get_obstacles(
@@ -342,19 +401,20 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 rel_ball = world2robot(me, ball)
                 d_ball = math.hypot(rel_ball[0], rel_ball[1])
                 dist_to_goal = _dist(me[:2], GOAL_TARGET)
-                mate_ahead = mate_pos[0] > ball[0] + 200
 
-                # -- Choose aim ----------------------------------------
+                # Is my teammate ahead and reachable?
+                mate_ahead = mate_pos[0] > ball[0] + 200
+                mate_reachable = (_dist(me[:2], mate_pos) < PASS_MAX_DIST
+                                  and _lane_clear(me[:2], mate_pos, obstacles))
+
+                # -- Choose aim: shoot, pass to mate, or dribble -------
                 goal_aim = _pick_goal_aim(me)
                 if (dist_to_goal < SHOOT_RANGE
                         and _lane_clear(me[:2], goal_aim, obstacles)):
                     aim = goal_aim
-                elif (mate_ahead
-                      and _dist(me[:2], mate_pos) < PASS_MAX_DIST
-                      and _lane_clear(me[:2], mate_pos, obstacles)):
+                elif mate_ahead and mate_reachable:
                     aim = mate_pos
                 else:
-                    # Dribble forward, compress toward field centre
                     aim = (min(ball[0] + 1000, HALF_LEN - 100),
                            ball[1] * 0.5)
 
@@ -384,23 +444,28 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                         if _dist(aim, GOAL_TARGET) < 800:
                             print(f"[coop {tag}] SHOT!")
                         else:
-                            print(f"[coop {tag}] PASS!")
+                            print(f"[coop {tag}] PASS to mate!")
                     if kr.burst_done:
                         ks.reset()
 
             # ----------------------------------------------------------
-            #  SUPPORT — position ahead of play, intercept passes
+            #  SUPPORT — go to planned position, stop, face ball, wait
+            #
+            #  Only recalculates position when ball moves significantly.
+            #  Once at position, stands still and watches ball.
+            #  If a pass comes, intercept it.
             # ----------------------------------------------------------
             else:
-                sup_target = _support_pos(ball, mate_pos)
-
+                # -- Compute approach speed of ball toward me ----------
                 dx_to_me = me[0] - ball[0]
                 dy_to_me = me[1] - ball[1]
                 dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
                 approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
 
-                if bspeed > 150 and approach_spd > 80:
-                    # Ball coming toward me — predict intercept point
+                ball_coming = bspeed > 150 and approach_spd > 80
+
+                if ball_coming:
+                    # -- Ball is coming toward me — intercept it -------
                     t_a = max(dd_to_me / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
                         ball, (bvx, bvy), min(t_a, 2.0))
@@ -408,14 +473,36 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     vx, vy = _go_to(me, intercept, APPROACH_SPD * 1.1,
                                     stop_r=30, ramp=500)
                     w = _face(me, ball)
+                    sup_planned_pos = None  # replan after receiving
+
                 else:
-                    # Advance to support position via diamond planner
-                    wp = dnav.next_waypoint(frame, is_yellow, robot_id,
-                                            me, sup_target)
-                    nav_target = wp if wp is not None else sup_target
-                    vx, vy = _go_to(me, nav_target, APPROACH_SPD,
-                                    stop_r=60, ramp=500)
-                    w = _face(me, ball)
+                    # -- Plan or hold receiving position ----------------
+                    # Only replan when ball has moved enough
+                    need_replan = (
+                        sup_planned_pos is None
+                        or sup_last_ball is None
+                        or _dist(ball, sup_last_ball) > SUP_REPLAN_DIST
+                    )
+                    if need_replan:
+                        sup_planned_pos = _support_pos(ball, mate_pos)
+                        sup_last_ball = ball
+                        dnav.clear()
+
+                    d_to_pos = _dist(me[:2], sup_planned_pos)
+
+                    if d_to_pos < SUP_STOP_DIST:
+                        # -- At position: stand still, face ball -------
+                        vx, vy = 0.0, 0.0
+                        w = _face(me, ball)
+                    else:
+                        # -- Navigate to position via diamond planner --
+                        wp = dnav.next_waypoint(
+                            frame, is_yellow, robot_id,
+                            me, sup_planned_pos)
+                        nav_target = wp if wp is not None else sup_planned_pos
+                        vx, vy = _go_to(me, nav_target, APPROACH_SPD,
+                                        stop_r=SUP_STOP_DIST, ramp=400)
+                        w = _face(me, ball)
 
                 if my_dist < 600:
                     dribble = 1
@@ -442,19 +529,20 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 my_role = "carrier" if is_yellow else "support"
                 ks.reset()
                 ball_history.clear()
+                sup_planned_pos = None
+                dnav.clear()
                 print(f"[coop {tag}] next cycle")
 
-        # -- Obstacle avoidance (all modes except kick burst) ----------
+        # -- Obstacle avoidance (skips teammate) -----------------------
         if not ks.bursting:
             if mode == "play" and ball is not None:
                 target_for_avoid = ball
             else:
                 target_for_avoid = home
             rel_target = world2robot(me, target_for_avoid)
-            avoid_vx, avoid_vy, closest_obs, prev_obs_pos = \
-                _compute_avoidance(
-                    me, frame, is_yellow, robot_id,
-                    rel_target, prev_obs_pos)
+            avoid_vx, avoid_vy, closest_obs = _coop_avoidance(
+                me, frame, is_yellow, robot_id,
+                mate_is_yellow, teammate_id, rel_target)
 
             if dribble == 1 and my_role == "carrier":
                 avoid_vx *= 0.4
