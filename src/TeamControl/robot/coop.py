@@ -53,7 +53,7 @@ CYCLE_TIMEOUT   = 15.0
 SUP_ADVANCE_FRAC = 0.55    # fraction of ball-to-goal distance to advance
 SUP_ADVANCE_MIN  = 1200    # minimum forward distance from ball
 SUP_ADVANCE_MAX  = 2200    # maximum forward distance from ball
-SUP_LATERAL      = 350     # mm — small lateral offset, mostly forward
+SUP_LATERAL      = 200     # mm — minimal lateral offset, pass goes lengthways
 LANE_CLEARANCE   = 250     # mm obstacle clearance for pass/shot lane
 SUP_REPLAN_DIST  = 400     # mm — only replan support position when ball moves this far
 SUP_STOP_DIST    = 80      # mm — stop moving when this close to target position
@@ -406,9 +406,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                              and dist_to_goal < SHOOT_RANGE
                              and _lane_clear(me[:2], goal_aim, obstacles))
 
-                # Pass aim: aim slightly past mate to send ball forward
-                # This flattens the angle so the kick is more lengthways
-                pass_aim = (mate_pos[0] + 200, mate_pos[1] * 0.7)
+                # Pass aim: aim well past mate along +x to send ball forward
+                # Flatten the y component so kick goes lengthways not sideways
+                pass_aim = (mate_pos[0] + 400, mate_pos[1] * 0.4)
 
                 if pass_count < 1 and mate_ahead and mate_reachable:
                     # Haven't passed yet — MUST pass forward to mate
@@ -422,9 +422,21 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     aim = (min(ball[0] + 1500, HALF_LEN - 100),
                            ball[1] * 0.2)
 
-                # -- Kick engine (with fast-ball intercept) -------------
-                use_ke = True
-                if bspeed > 200 and not ks.bursting:
+                # -- Navigate around obstacles, then kick engine ----------
+                # Use diamond nav to get near ball safely first.
+                # Only hand off to kick engine when close and path clear.
+                HANDOFF_DIST = 500  # mm — use diamond nav above this
+                wp = dnav.next_waypoint(
+                    frame, is_yellow, robot_id, me, ball)
+                path_blocked = (wp is not None and d_ball > HANDOFF_DIST)
+
+                if path_blocked and not ks.bursting:
+                    # Obstacles between me and ball — navigate around them
+                    vx, vy = _go_to(me, wp, APPROACH_SPD,
+                                    stop_r=40, ramp=400)
+                    w = _face(me, ball)
+                elif bspeed > 200 and not ks.bursting:
+                    # Fast ball intercept
                     dx = me[0] - ball[0]
                     dy = me[1] - ball[1]
                     dd = max(math.hypot(dx, dy), 1.0)
@@ -437,9 +449,20 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                         vx, vy = _go_to(me, intercept, APPROACH_SPD,
                                         stop_r=30, ramp=500)
                         w = _face(me, ball)
-                        use_ke = False
-
-                if use_ke:
+                    else:
+                        kr = kick_tick(ks, me, ball, aim, now,
+                                       rel_ball, d_ball)
+                        vx, vy, w = kr.vx, kr.vy, kr.w
+                        kick, dribble = kr.kick, kr.dribble
+                        if kr.kick_started:
+                            if _dist(aim, GOAL_TARGET) < 800:
+                                print(f"[coop {tag}] SHOT!")
+                            else:
+                                print(f"[coop {tag}] PASS to mate!")
+                        if kr.burst_done:
+                            ks.reset()
+                else:
+                    # Close enough and path clear — kick engine
                     kr = kick_tick(ks, me, ball, aim, now,
                                    rel_ball, d_ball)
                     vx, vy, w = kr.vx, kr.vy, kr.w
