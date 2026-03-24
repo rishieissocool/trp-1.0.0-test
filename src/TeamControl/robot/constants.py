@@ -96,9 +96,9 @@ DISTRIBUTE_SPEED  = 0.40 * MAX_SPEED   # dribble to pass
 
 KICK_RANGE        = 175      # trigger kick distance — get closer before engaging
 KICK_DIST         = 160      # alias used by goalie
-BALL_NEAR         = 400      # "close to ball" threshold
-BEHIND_DIST       = 280      # lineup distance behind ball — further back for clean approach
-AVOID_RADIUS      = 450      # swing-around radius — wider arc for proper lineup
+BALL_NEAR         = 500      # "close to ball" threshold
+BEHIND_DIST       = 400      # lineup distance behind ball — get well behind before approaching
+AVOID_RADIUS      = 550      # swing-around radius — wide arc to approach from directly behind
 MAX_ADVANCE       = PENALTY_DEPTH - 50  # goalie must stay inside penalty box
 
 PRESSURE_DIST     = 500      # mm — opponent "under pressure" radius

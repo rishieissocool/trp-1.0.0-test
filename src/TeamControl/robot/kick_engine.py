@@ -226,19 +226,26 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     rel_nav = world2robot(me, nav)
     d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
-    if is_behind and d_nav < 300 and d_ball < BALL_NEAR:
-        # Lined up behind — drive straight at ball, precisely
+    # Check if we're truly behind: ball must be in front of us AND
+    # we must be roughly facing the aim direction
+    facing_aim = abs(ang_aim) < 0.4  # ~23 deg tolerance
+    ball_in_front = rel_ball[0] > 0
+
+    if is_behind and d_nav < 300 and d_ball < BALL_NEAR and facing_aim and ball_in_front:
+        # Properly behind and aligned — drive straight at ball
         r.dribble = 1
         r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD,
                                   ramp_dist=200, stop_dist=0)
         r.w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
     else:
-        # Still getting behind — slow, precise approach
-        r.vx, r.vy = move_toward(rel_nav, DRIBBLE_SPD * 1.2,
+        # Not behind yet — keep arcing, go slow
+        r.vx, r.vy = move_toward(rel_nav, DRIBBLE_SPD * 1.0,
                                   ramp_dist=300, stop_dist=10)
+        # Face the ball while getting into position
         r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-        # Slow down translation when facing far from ball
-        r.vx, r.vy = turn_then_move(r.vx, r.vy, r.w, abs(ang_ball))
+        # Almost stop when facing far from ball — turn first, then move
+        r.vx, r.vy = turn_then_move(r.vx, r.vy, r.w, abs(ang_ball),
+                                     threshold=0.25)
 
     r.committed_side = ks.committed_side
     return r

@@ -1,149 +1,166 @@
 """
-Shared Diamond path-planning helper for robot behavior modules.
+Simple obstacle-steering navigation for robot behavior modules.
 
-Builds a DiamondPlanner from the current vision frame and returns the next
-waypoint for a robot to drive toward.  Caches obstacle positions and only
-replans when obstacles move, the goal changes, or the current path becomes
-invalid.
+Every tick: check if straight line to goal is blocked by any robot on the
+field.  If blocked, compute a waypoint that steers around the closest
+blocker.  No graph, no A* — just geometry.  Fast, reliable, never crashes.
+
+AVOIDS EVERY ROBOT ON THE FIELD except the planning robot itself (and
+optionally excluded IDs like a teammate).
 
 Usage:
     from TeamControl.robot.diamond_nav import DiamondNav
 
     dnav = DiamondNav()
-    ...
-    waypoint = dnav.next_waypoint(frame, is_yellow, robot_id, me_xy, goal_xy)
-    if waypoint is not None:
-        # drive toward waypoint instead of goal directly
+    dnav.set_exclude((True, 3))   # optional: skip teammate
+    wp = dnav.next_waypoint(frame, is_yellow, robot_id, me_xy, goal_xy)
+    if wp is not None:
+        # drive toward wp instead of goal
 """
 
-import numpy as np
-from TeamControl.voronoi_planner.diamond_planner import DiamondPlanner, ROBOT_RADIUS
-from TeamControl.voronoi_planner.obstacle import Obstacle
+import math
 
-
-# How close (mm) to a waypoint before advancing to the next one
-_WP_REACHED = 120
-# Replan when goal moves more than this (mm)
-_GOAL_REPLAN = 250
-# Replan when any obstacle has moved more than this (mm)
-_OBS_MOVE_THRESH = 150
-# Max age (ticks) before forcing a replan even if nothing seems to have moved
-_MAX_PLAN_AGE = 30
+# Clearance from obstacle centre (obstacle radius + this margin)
+AVOID_MARGIN = 220   # mm — generous margin on top of obstacle radius
 
 
 class DiamondNav:
-    """Stateful path-planner wrapper — one instance per robot."""
+    """Stateful obstacle-steering planner — one instance per robot."""
 
     def __init__(self):
-        self._path = []
-        self._wp_idx = 0
-        self._last_goal = None
-        self._last_obs_positions = None   # np array of obstacle centers
-        self._plan_age = 0
-        self._exclude_ids = set()         # (color, id) pairs to skip
+        self._exclude_ids = set()
 
     def set_exclude(self, *pairs):
-        """Extra robot IDs to exclude from obstacles, e.g. teammate.
-
-        Call like: dnav.set_exclude((True, 3), (False, 1))
+        """Robot IDs to skip as obstacles, e.g. teammate.
+        Call like: dnav.set_exclude((True, 3))
         """
         self._exclude_ids = set(pairs)
 
     def next_waypoint(self, frame, is_yellow, robot_id, me_xy, goal_xy,
-                      replan_dist=_GOAL_REPLAN):
-        """
-        Return the next waypoint (x, y) the robot should drive toward,
-        or *None* if the straight line to goal is clear.
-        """
-        me   = np.asarray(me_xy[:2], dtype=float)
-        goal = np.asarray(goal_xy[:2], dtype=float)
+                      replan_dist=None):
+        """Return (x, y) waypoint to steer around obstacles, or None if
+        the straight line to goal is clear."""
+        me = (float(me_xy[0]), float(me_xy[1]))
+        goal = (float(goal_xy[0]), float(goal_xy[1]))
 
-        self._plan_age += 1
-
-        # --- Decide if we need a (re)plan ---
-        need_plan = len(self._path) == 0 or self._last_goal is None
-
-        # Goal moved?
-        if not need_plan and np.linalg.norm(goal - self._last_goal) > replan_dist:
-            need_plan = True
-
-        # Obstacles moved?
-        obs_list = _obstacles_from_frame(
-            frame, is_yellow, robot_id, self._exclude_ids)
-        curr_obs_pos = np.array([o.centre() for o in obs_list]) \
-            if obs_list else np.empty((0, 2))
-
-        if not need_plan and self._last_obs_positions is not None:
-            if curr_obs_pos.shape == self._last_obs_positions.shape and len(curr_obs_pos) > 0:
-                max_move = np.max(np.linalg.norm(
-                    curr_obs_pos - self._last_obs_positions, axis=1))
-                if max_move > _OBS_MOVE_THRESH:
-                    need_plan = True
-            elif curr_obs_pos.shape != self._last_obs_positions.shape:
-                need_plan = True
-
-        # Stale plan?
-        if not need_plan and self._plan_age > _MAX_PLAN_AGE:
-            need_plan = True
-
-        # Current path segment blocked?
-        if not need_plan and self._wp_idx < len(self._path):
-            planner = DiamondPlanner(obs_list)
-            wp_pos = np.asarray(self._path[self._wp_idx])
-            if not planner.is_path_free(me, wp_pos):
-                need_plan = True
-
-        # --- Plan ---
-        if need_plan:
-            planner = DiamondPlanner(obs_list)
-            self._path = planner.plan_path(me, goal)
-            self._wp_idx = 1  # skip index 0 (current position)
-            self._last_goal = goal.copy()
-            self._last_obs_positions = curr_obs_pos.copy() if len(curr_obs_pos) > 0 else None
-            self._plan_age = 0
-
-        # --- Advance through reached waypoints ---
-        while (self._wp_idx < len(self._path) - 1
-               and np.linalg.norm(me - np.asarray(self._path[self._wp_idx])) < _WP_REACHED):
-            self._wp_idx += 1
-
-        # --- Return ---
-        if self._wp_idx >= len(self._path):
+        # Collect every robot on field except me (and excludes)
+        obstacles = _get_all_obstacles(frame, is_yellow, robot_id,
+                                       self._exclude_ids)
+        if not obstacles:
             return None
 
-        # If only [start, goal] and start is us, straight line is clear
-        if len(self._path) <= 2 and self._wp_idx >= len(self._path) - 1:
-            return None
+        # Find the first obstacle blocking the straight line to goal
+        blocker = _first_blocker(me, goal, obstacles)
+        if blocker is None:
+            return None  # path is clear
 
-        wp = self._path[self._wp_idx]
-        return (float(wp[0]), float(wp[1]))
+        # Compute two tangent waypoints around the blocker
+        left, right = _steer_around(me, goal, blocker)
+
+        # Pick the side that keeps us closer to the goal
+        dl = _dist(left, goal)
+        dr = _dist(right, goal)
+        wp = left if dl < dr else right
+
+        # Check if the chosen waypoint is itself inside another obstacle
+        # If so, push it further out
+        for obs in obstacles:
+            ox, oy, orad = obs
+            d_to_obs = _dist(wp, (ox, oy))
+            safe_r = orad + AVOID_MARGIN
+            if d_to_obs < safe_r and d_to_obs > 1:
+                # Push waypoint outward from this obstacle
+                dx = wp[0] - ox
+                dy = wp[1] - oy
+                scale = safe_r / d_to_obs
+                wp = (ox + dx * scale, oy + dy * scale)
+
+        return wp
 
     def clear(self):
-        """Reset the planner state (e.g. after a mode change)."""
-        self._path = []
-        self._wp_idx = 0
-        self._last_goal = None
-        self._last_obs_positions = None
-        self._plan_age = 0
+        """API compat — nothing to reset in this simple planner."""
+        pass
 
 
-def _obstacles_from_frame(frame, is_yellow, robot_id, extra_exclude=None):
-    """Extract Obstacle list from a vision frame, excluding the given robot
-    and any additional (color, id) pairs in extra_exclude."""
-    if extra_exclude is None:
-        extra_exclude = set()
+def _dist(a, b):
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _first_blocker(start, goal, obstacles):
+    """Find the closest obstacle along the line from start to goal that
+    blocks the path.  Returns (cx, cy, radius) or None."""
+    sx, sy = start
+    gx, gy = goal
+    dx, dy = gx - sx, gy - sy
+    length = math.hypot(dx, dy)
+    if length < 1:
+        return None
+    ux, uy = dx / length, dy / length
+    nx, ny = -uy, ux  # normal
+
+    best = None
+    best_along = float('inf')
+
+    for (ox, oy, orad) in obstacles:
+        # Vector from start to obstacle centre
+        rx, ry = ox - sx, oy - sy
+        along = rx * ux + ry * uy  # projection along line
+        perp = abs(rx * nx + ry * ny)  # distance from line
+
+        safe_r = orad + AVOID_MARGIN
+
+        # Only consider obstacles that are between start and goal
+        if along < -safe_r or along > length + safe_r:
+            continue
+
+        # Check if obstacle is close enough to the line to block it
+        if perp < safe_r:
+            if along < best_along:
+                best_along = along
+                best = (ox, oy, orad)
+
+    return best
+
+
+def _steer_around(me, goal, blocker):
+    """Compute two waypoints (left, right) that go around the blocker."""
+    ox, oy, orad = blocker
+    safe_r = orad + AVOID_MARGIN
+
+    # Direction from me to goal
+    dx, dy = goal[0] - me[0], goal[1] - me[1]
+    length = max(math.hypot(dx, dy), 1.0)
+    ux, uy = dx / length, dy / length
+
+    # Perpendicular
+    px, py = -uy, ux
+
+    # Two waypoints: left and right of the obstacle
+    left = (ox + px * safe_r, oy + py * safe_r)
+    right = (ox - px * safe_r, oy - py * safe_r)
+
+    return left, right
+
+
+def _get_all_obstacles(frame, is_yellow, robot_id, exclude_ids):
+    """Get (cx, cy, radius) for every robot on field except self and excludes."""
     obstacles = []
     for color in (True, False):
         for oid in range(16):
             if color == is_yellow and oid == robot_id:
                 continue
-            if (color, oid) in extra_exclude:
+            if (color, oid) in exclude_ids:
                 continue
             try:
                 other = frame.get_yellow_robots(isYellow=color, robot_id=oid)
                 if isinstance(other, int) or other is None:
                     continue
-                obstacles.append(other.obstacle)
+                op = other.position
+                # Use obstacle radius if available, otherwise default 90mm
+                rad = 90
+                if hasattr(other, 'obstacle') and other.obstacle is not None:
+                    rad = other.obstacle.radius
+                obstacles.append((float(op[0]), float(op[1]), rad))
             except Exception:
                 continue
     return obstacles
