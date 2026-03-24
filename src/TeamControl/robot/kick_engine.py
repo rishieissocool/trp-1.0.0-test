@@ -21,13 +21,13 @@ from TeamControl.robot.constants import (
 )
 
 # -- Tuning ---------------------------------------------------------------
-CONTACT_DIST    = 160       # mm — ball on dribbler (slightly wider pickup)
-KICK_ALIGN_TOL  = 0.15      # rad (~9 deg) — good enough alignment to kick
-KICK_BURST_T    = 0.50      # s — sustain kick=1 so grSim registers
-FORCE_KICK_TIME = 1.2       # s — max time holding ball before force kick
+CONTACT_DIST    = 160       # mm — ball on dribbler
+KICK_ALIGN_TOL  = 0.12      # rad (~7 deg) — precise alignment for accurate kicks
+KICK_BURST_T    = 0.55      # s — sustain kick=1 so grSim registers
+FORCE_KICK_TIME = 2.0       # s — patient, give time to rotate fully
 DRIBBLE_SPD     = DRIBBLE_SPEED
-HOLD_VX         = DRIBBLE_SPD * 0.30  # gentle forward pressure while rotating
-HOLD_VY_GAIN    = 0.25
+HOLD_VX_ALIGNED = DRIBBLE_SPD * 0.15  # tiny creep only when nearly aligned
+HOLD_VY_GAIN    = 0.15
 
 
 class KickState:
@@ -119,25 +119,33 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         return r
 
     # ==================================================================
-    #  CONTACT — ball on dribbler. Hold it, rotate to face aim, kick.
+    #  CONTACT — ball on dribbler.
+    #  STOP MOVING. Rotate in place to face aim. Then kick.
+    #  Only allow tiny forward creep when nearly aligned.
     # ==================================================================
     if d_ball < CONTACT_DIST and rel_ball[0] > -10:
         r.dribble = 1
 
-        # Rotate to face aim
-        r.w = clamp(ang_aim * TURN_GAIN * 2.5, -MAX_W, MAX_W)
+        # ROTATE IN PLACE — strong rotation, no translation
+        r.w = clamp(ang_aim * TURN_GAIN * 3.0, -MAX_W, MAX_W)
 
-        # Gentle forward pressure scaled by alignment
-        align_factor = max(1.0 - abs(ang_aim) / 0.5, 0.1)
-        r.vx = HOLD_VX * align_factor
-        r.vy = clamp(rel_ball[1] * HOLD_VY_GAIN,
-                      -DRIBBLE_SPD * 0.15, DRIBBLE_SPD * 0.15) * align_factor
+        misalignment = abs(ang_aim)
+
+        if misalignment > 0.20:
+            # Still turning — stop all movement, just spin
+            r.vx = 0.0
+            r.vy = 0.0
+        else:
+            # Nearly aligned — tiny forward creep to maintain contact
+            r.vx = HOLD_VX_ALIGNED
+            r.vy = clamp(rel_ball[1] * HOLD_VY_GAIN,
+                          -DRIBBLE_SPD * 0.08, DRIBBLE_SPD * 0.08)
 
         if ks.near_ball_since == 0.0:
             ks.near_ball_since = now
         time_near = now - ks.near_ball_since
         can_kick = (now - ks.last_kick) > KICK_COOLDOWN
-        aligned = abs(ang_aim) < KICK_ALIGN_TOL
+        aligned = misalignment < KICK_ALIGN_TOL
         force_kick = time_near > FORCE_KICK_TIME
 
         if can_kick and (aligned or force_kick):
@@ -175,29 +183,35 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         return r
 
     # ==================================================================
-    #  FAR — drive at ball. Slow down as we get closer.
+    #  FAR — turn to face ball first, then drive.
+    #  If not facing ball, rotate in place. Only move when facing it.
     # ==================================================================
     ks.near_ball_since = 0.0
     r.dribble = 1 if d_ball < BALL_NEAR else 0
 
-    r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+    r.w = clamp(ang_ball * TURN_GAIN * 1.5, -MAX_W, MAX_W)
 
-    # Ramp speed: fast when far, slow when approaching
-    if d_ball > BALL_NEAR:
-        speed = CRUISE_SPEED * 0.8
-    elif d_ball > KICK_RANGE * 2:
-        speed = DRIBBLE_SPD * 0.7
+    if abs(ang_ball) > 0.5:
+        # Not facing ball — rotate in place, don't move
+        r.vx = 0.0
+        r.vy = 0.0
     else:
-        speed = DRIBBLE_SPD * 0.4
+        # Facing ball — drive toward it, slower as we get closer
+        if d_ball > BALL_NEAR:
+            speed = CRUISE_SPEED * 0.7
+        elif d_ball > KICK_RANGE * 2:
+            speed = DRIBBLE_SPD * 0.6
+        else:
+            speed = DRIBBLE_SPD * 0.35
 
-    r.vx, r.vy = move_toward(rel_ball, speed,
-                              ramp_dist=400, stop_dist=10)
+        r.vx, r.vy = move_toward(rel_ball, speed,
+                                  ramp_dist=400, stop_dist=10)
 
-    # If not facing ball, slow down to turn first
-    if abs(ang_ball) > 0.4:
-        scale = max(1.0 - abs(ang_ball) / 1.0, 0.1)
-        r.vx *= scale
-        r.vy *= scale
+        # Reduce speed proportionally to remaining angle error
+        if abs(ang_ball) > 0.2:
+            scale = max(1.0 - abs(ang_ball) / 0.5, 0.2)
+            r.vx *= scale
+            r.vy *= scale
 
     r.committed_side = ks.committed_side
     return r
