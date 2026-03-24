@@ -99,31 +99,71 @@ def _pick_goal_aim(me):
     return (HALF_LEN, offset)
 
 
-def _teammate_avoidance(me, frame, mate_is_yellow, mate_id):
-    """Repulsion from teammate only — keep spacing.
-    Returns (avoid_vx, avoid_vy) in robot frame.
-    """
-    MATE_AVOID_DIST = 600
-    MATE_AVOID_STRENGTH = 3.0
+def _avoid_all_robots(me, frame, is_yellow, robot_id, mate_is_yellow, mate_id):
+    """Reactive repulsion from EVERY other robot on the field.
 
+    Scans all robot IDs on both teams. Skips self, teammate, and
+    phantom robots (at origin or low confidence). Returns summed
+    repulsion (vx, vy) in robot frame.
+    """
+    AVOID_DIST = 400        # mm — start pushing at this distance
+    AVOID_STRENGTH = 5.0    # strong push to prevent any contact
+
+    total_vx, total_vy = 0.0, 0.0
+
+    for color in (True, False):
+        for oid in range(16):
+            # Skip self
+            if color == is_yellow and oid == robot_id:
+                continue
+            # Skip teammate (handled separately with softer repulsion)
+            if color == mate_is_yellow and oid == mate_id:
+                continue
+            try:
+                other = frame.get_yellow_robots(isYellow=color, robot_id=oid)
+                if isinstance(other, int) or other is None:
+                    continue
+                if hasattr(other, 'confidence') and other.confidence < 0.1:
+                    continue
+                op = other.position
+                ox, oy = float(op[0]), float(op[1])
+                # Skip phantoms at origin
+                if abs(ox) < 1 and abs(oy) < 1:
+                    continue
+
+                rel = world2robot(me, (ox, oy))
+                d = math.hypot(rel[0], rel[1])
+                if d >= AVOID_DIST or d < 1:
+                    continue
+
+                t = (AVOID_DIST - d) / AVOID_DIST
+                strength = AVOID_STRENGTH * t * t  # quadratic — strong close up
+                inv_d = 1.0 / d
+                total_vx -= rel[0] * inv_d * strength
+                total_vy -= rel[1] * inv_d * strength
+            except Exception:
+                continue
+
+    # Also avoid teammate (softer)
+    MATE_DIST = 500
+    MATE_STR = 2.5
     try:
         other = frame.get_yellow_robots(isYellow=mate_is_yellow,
                                          robot_id=mate_id)
-        if isinstance(other, int) or other is None:
-            return 0.0, 0.0
-        op = other.position
-        rel = world2robot(me, (float(op[0]), float(op[1])))
-        d = math.hypot(rel[0], rel[1])
-
-        if d >= MATE_AVOID_DIST or d < 1:
-            return 0.0, 0.0
-
-        t = (MATE_AVOID_DIST - d) / MATE_AVOID_DIST
-        strength = MATE_AVOID_STRENGTH * t
-        inv_d = 1.0 / d
-        return -rel[0] * inv_d * strength, -rel[1] * inv_d * strength
+        if not isinstance(other, int) and other is not None:
+            op = other.position
+            rel = world2robot(me, (float(op[0]), float(op[1])))
+            d = math.hypot(rel[0], rel[1])
+            if 1 < d < MATE_DIST:
+                t = (MATE_DIST - d) / MATE_DIST
+                strength = MATE_STR * t
+                inv_d = 1.0 / d
+                total_vx -= rel[0] * inv_d * strength
+                total_vy -= rel[1] * inv_d * strength
     except Exception:
-        return 0.0, 0.0
+        pass
+
+    return total_vx, total_vy
 
 
 # =====================================================================
@@ -394,10 +434,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 ball_history.clear()
                 print(f"[coop {tag}] next cycle")
 
-        # -- Teammate avoidance (only thing needed) ---------------------
+        # -- Avoid all robots on field (static obstacles + teammate) -----
         if not ks.bursting:
-            avoid_vx, avoid_vy = _teammate_avoidance(
-                me, frame, mate_is_yellow, teammate_id)
+            avoid_vx, avoid_vy = _avoid_all_robots(
+                me, frame, is_yellow, robot_id,
+                mate_is_yellow, teammate_id)
             vx += avoid_vx
             vy += avoid_vy
 
