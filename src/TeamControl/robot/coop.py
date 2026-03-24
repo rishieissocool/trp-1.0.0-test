@@ -161,72 +161,37 @@ def _pick_goal_aim(me):
     return (HALF_LEN, offset)
 
 
-def _coop_avoidance(me, frame, is_yellow, robot_id, mate_is_yellow,
-                     mate_id, rel_target):
-    """Obstacle avoidance — avoids everyone INCLUDING teammate.
+def _teammate_avoidance(me, frame, mate_is_yellow, mate_id):
+    """Repulsion from teammate only — static obstacles handled by path planner.
 
-    Teammate gets even stronger repulsion to guarantee no collisions.
-    Returns (avoid_vx, avoid_vy, closest_obs_dist).
+    Returns (avoid_vx, avoid_vy).
     """
-    AVOID_DIST = 550
-    AVOID_CRITICAL = 260
-    AVOID_STRENGTH = 2.5
-    TANGENT_RATIO = 0.3
+    MATE_AVOID_DIST = 700       # start pushing away at this distance
+    MATE_AVOID_CRITICAL = 300   # max strength below this
+    MATE_AVOID_STRENGTH = 4.0   # strong repulsion — never collide
 
-    # Teammate avoidance — stronger and starts further out
-    MATE_AVOID_DIST = 700
-    MATE_AVOID_CRITICAL = 350
-    MATE_AVOID_STRENGTH = 3.5
+    try:
+        other = frame.get_yellow_robots(isYellow=mate_is_yellow,
+                                         robot_id=mate_id)
+        if isinstance(other, int) or other is None:
+            return 0.0, 0.0
+        op = other.position
+        rel = world2robot(me, (float(op[0]), float(op[1])))
+        d = math.hypot(rel[0], rel[1])
 
-    avoid_vx, avoid_vy = 0.0, 0.0
-    closest_obs = 9999.0
+        if d >= MATE_AVOID_DIST or d < 1:
+            return 0.0, 0.0
 
-    for color in (True, False):
-        for oid in range(16):
-            # Skip myself
-            if color == is_yellow and oid == robot_id:
-                continue
-            is_mate = (color == mate_is_yellow and oid == mate_id)
-            try:
-                other = frame.get_yellow_robots(isYellow=color, robot_id=oid)
-                if isinstance(other, int) or other is None:
-                    continue
-                op = other.position
-                ox, oy = float(op[0]), float(op[1])
+        if d <= MATE_AVOID_CRITICAL:
+            strength = MATE_AVOID_STRENGTH
+        else:
+            t = (MATE_AVOID_DIST - d) / (MATE_AVOID_DIST - MATE_AVOID_CRITICAL)
+            strength = MATE_AVOID_STRENGTH * 0.5 * (1.0 - math.cos(math.pi * t))
 
-                rel_obs = world2robot(me, (ox, oy))
-                d_obs = math.hypot(rel_obs[0], rel_obs[1])
-
-                if d_obs < closest_obs:
-                    closest_obs = d_obs
-
-                # Use stronger avoidance for teammate
-                a_dist = MATE_AVOID_DIST if is_mate else AVOID_DIST
-                a_crit = MATE_AVOID_CRITICAL if is_mate else AVOID_CRITICAL
-                a_str = MATE_AVOID_STRENGTH if is_mate else AVOID_STRENGTH
-
-                if d_obs >= a_dist:
-                    continue
-                if d_obs <= a_crit:
-                    strength = a_str
-                else:
-                    t = (a_dist - d_obs) / (a_dist - a_crit)
-                    strength = a_str * 0.5 * (1.0 - math.cos(math.pi * t))
-
-                if strength > 0.001 and d_obs > 1:
-                    inv_d = 1.0 / d_obs
-                    rep_x = -rel_obs[0] * inv_d * strength
-                    rep_y = -rel_obs[1] * inv_d * strength
-                    tang_x = rel_obs[1] * inv_d
-                    tang_y = -rel_obs[0] * inv_d
-                    if tang_x * rel_target[0] + tang_y * rel_target[1] < 0:
-                        tang_x, tang_y = -tang_x, -tang_y
-                    avoid_vx += rep_x + tang_x * strength * TANGENT_RATIO
-                    avoid_vy += rep_y + tang_y * strength * TANGENT_RATIO
-            except Exception:
-                continue
-
-    return avoid_vx, avoid_vy, closest_obs
+        inv_d = 1.0 / d
+        return -rel[0] * inv_d * strength, -rel[1] * inv_d * strength
+    except Exception:
+        return 0.0, 0.0
 
 
 # =====================================================================
@@ -564,37 +529,12 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 dnav.clear()
                 print(f"[coop {tag}] next cycle")
 
-        # -- Obstacle avoidance (skips teammate) -----------------------
+        # -- Teammate avoidance (static obstacles handled by path planner)
         if not ks.bursting:
-            if mode == "play" and ball is not None:
-                target_for_avoid = ball
-            else:
-                target_for_avoid = home
-            rel_target = world2robot(me, target_for_avoid)
-            avoid_vx, avoid_vy, closest_obs = _coop_avoidance(
-                me, frame, is_yellow, robot_id,
-                mate_is_yellow, teammate_id, rel_target)
-
-            if dribble == 1 and my_role == "carrier":
-                avoid_vx *= 0.6
-                avoid_vy *= 0.6
-
+            avoid_vx, avoid_vy = _teammate_avoidance(
+                me, frame, mate_is_yellow, teammate_id)
             vx += avoid_vx
             vy += avoid_vy
-
-            if closest_obs < 550:
-                if closest_obs <= 260:
-                    speed_frac = 0.5
-                else:
-                    t = (550.0 - closest_obs) / (550.0 - 260.0)
-                    speed_frac = 1.0 - 0.25 * \
-                        (1.0 - math.cos(math.pi * t))
-                spd = math.hypot(vx, vy)
-                if spd > 0.01:
-                    max_near = APPROACH_SPD * speed_frac
-                    if spd > max_near:
-                        vx = vx / spd * max_near
-                        vy = vy / spd * max_near
 
         # -- Speed cap --------------------------------------------------
         spd = math.hypot(vx, vy)

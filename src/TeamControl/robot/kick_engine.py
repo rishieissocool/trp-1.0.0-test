@@ -31,17 +31,17 @@ from TeamControl.robot.constants import (
 )
 
 # -- Tuning (shared across all users) ----------------------------------
-CONTACT_DIST    = 115       # mm — ball touching dribbler (90 robot + 21 ball + small margin)
-KICK_ALIGN_TOL  = 0.18      # rad (~10 deg) — slightly more forgiving alignment
-KICK_BURST_T    = 0.50      # s — sustain kick=1 longer so grSim reliably registers
-FORCE_KICK_TIME = 1.5       # s — force kick sooner if stuck near ball
+CONTACT_DIST    = 120       # mm — ball touching dribbler
+KICK_ALIGN_TOL  = 0.10      # rad (~6 deg) — tight alignment for precise kicks
+KICK_BURST_T    = 0.55      # s — sustain kick=1 longer so grSim reliably registers
+FORCE_KICK_TIME = 2.5       # s — be patient, wait for proper alignment
 DRIBBLE_SPD     = DRIBBLE_SPEED
 APPROACH_SPD    = CRUISE_SPEED
 
 # Forward pressure while dribbling/rotating — keeps ball on dribbler
-HOLD_VX         = DRIBBLE_SPD * 0.55
+HOLD_VX         = DRIBBLE_SPD * 0.35  # gentle pressure — don't push ball away while turning
 # Lateral correction gain — nudge sideways to stay centered on ball
-HOLD_VY_GAIN    = 0.4
+HOLD_VY_GAIN    = 0.3
 
 
 class KickState:
@@ -143,13 +143,15 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     if d_ball < CONTACT_DIST and rel_ball[0] > -10:
         r.dribble = 1
 
-        # Forward pressure — keep ball pressed against dribbler
-        r.vx = HOLD_VX
-        # Lateral correction — if ball drifts sideways, nudge toward it
-        r.vy = clamp(rel_ball[1] * HOLD_VY_GAIN, -DRIBBLE_SPD * 0.3,
-                      DRIBBLE_SPD * 0.3)
-        # Rotate to face aim with boosted gain
-        r.w = clamp(ang_aim * TURN_GAIN * 1.8, -MAX_W, MAX_W)
+        # Rotate to face aim — prioritise turning, reduce movement
+        r.w = clamp(ang_aim * TURN_GAIN * 2.0, -MAX_W, MAX_W)
+
+        # Scale forward pressure by alignment — stop pushing when misaligned
+        align_factor = max(1.0 - abs(ang_aim) / 0.5, 0.1)
+        r.vx = HOLD_VX * align_factor
+        # Lateral correction — nudge toward ball center
+        r.vy = clamp(rel_ball[1] * HOLD_VY_GAIN, -DRIBBLE_SPD * 0.2,
+                      DRIBBLE_SPD * 0.2) * align_factor
 
         if ks.near_ball_since == 0.0:
             ks.near_ball_since = now
@@ -159,8 +161,8 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         aligned = abs(ang_aim) < KICK_ALIGN_TOL
 
         # Also kick if we've been near long enough and roughly aligned
-        roughly_aligned = abs(ang_aim) < KICK_ALIGN_TOL * 2.5
-        patient_kick = time_near > (FORCE_KICK_TIME * 0.6) and roughly_aligned
+        roughly_aligned = abs(ang_aim) < KICK_ALIGN_TOL * 3.0
+        patient_kick = time_near > (FORCE_KICK_TIME * 0.7) and roughly_aligned
 
         if can_kick and (aligned or force_kick or patient_kick):
             # Start kick burst
