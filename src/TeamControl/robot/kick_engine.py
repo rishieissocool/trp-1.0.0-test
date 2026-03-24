@@ -211,37 +211,55 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         return r
 
     # ==================================================================
-    #  P3: Drive toward ball (same style as right-click "go to ball").
+    #  P3: Get behind ball, then drive at it (right-click speed style).
     #
-    #  Three distance bands — fast cruise, slow approach, dribble close.
-    #  Blend facing from ball → aim as we get closer so we arrive in
-    #  kicking position.  P2/P1 take over once close + aligned.
+    #  Step 1: Go to behind point (opposite side of ball from aim).
+    #          Use smooth right-click speeds — fast far, slow close.
+    #  Step 2: Once behind and facing ball, drive straight at it.
+    #          P2/P1 take over for the actual kick.
     # ==================================================================
     ks.near_ball_since = 0.0
 
-    FAR_DIST  = 600.0   # mm — cruise speed
-    SLOW_DIST = 250.0   # mm — start slowing + dribbling
+    # Behind point = ball - aim_direction * BEHIND_DIST
+    ba_dx = aim[0] - ball[0]
+    ba_dy = aim[1] - ball[1]
+    ba_d = max(math.hypot(ba_dx, ba_dy), 1.0)
+    aim_ux, aim_uy = ba_dx / ba_d, ba_dy / ba_d
+    behind = (ball[0] - aim_ux * BEHIND_DIST,
+              ball[1] - aim_uy * BEHIND_DIST)
 
-    # Blend facing: far = face ball, close = face aim
-    blend = clamp(1.0 - d_ball / FAR_DIST, 0.0, 1.0)
-    w_ball = ang_ball * 0.6
-    w_aim  = ang_aim * 0.7
-    r.w = clamp(w_ball * (1.0 - blend) + w_aim * blend, -MAX_W, MAX_W)
+    rel_behind = world2robot(me, behind)
+    d_behind = math.hypot(rel_behind[0], rel_behind[1])
+    ang_behind = math.atan2(rel_behind[1], rel_behind[0])
 
-    if d_ball > FAR_DIST:
-        # Far: cruise toward ball
-        r.vx, r.vy = move_toward(rel_ball, 0.6, ramp_dist=800,
-                                  stop_dist=SLOW_DIST)
-    elif d_ball > CONTACT_DIST:
-        # Mid: slow approach with dribbler
+    at_behind = d_behind < 180
+    facing_ball = abs(ang_ball) < 0.5
+
+    if at_behind and facing_ball:
+        # Behind the ball, facing it — drive straight in (like right-click)
         r.dribble = 1
-        r.vx, r.vy = move_toward(rel_ball, 0.25, ramp_dist=400,
-                                  stop_dist=CONTACT_DIST * 0.5)
+        if d_ball > 600:
+            r.vx, r.vy = move_toward(rel_ball, 0.6, ramp_dist=800,
+                                      stop_dist=250)
+        elif d_ball > CONTACT_DIST:
+            r.vx, r.vy = move_toward(rel_ball, 0.25, ramp_dist=400,
+                                      stop_dist=CONTACT_DIST * 0.5)
+        else:
+            r.vx, r.vy = move_toward(rel_ball, 0.12, ramp_dist=150,
+                                      stop_dist=40)
+        r.w = clamp(ang_ball * 0.6, -MAX_W, MAX_W)
     else:
-        # Very close: gentle push toward ball
-        r.dribble = 1
-        r.vx, r.vy = move_toward(rel_ball, 0.12, ramp_dist=150,
-                                  stop_dist=40)
+        # Go to behind point — same smooth speeds as right-click
+        if d_behind > 600:
+            r.vx, r.vy = move_toward(rel_behind, 0.6, ramp_dist=800,
+                                      stop_dist=250)
+        elif d_behind > 150:
+            r.vx, r.vy = move_toward(rel_behind, 0.35, ramp_dist=400,
+                                      stop_dist=80)
+        else:
+            r.vx, r.vy = move_toward(rel_behind, 0.15, ramp_dist=150,
+                                      stop_dist=30)
+        r.w = clamp(ang_behind * 0.6, -MAX_W, MAX_W)
 
     r.committed_side = ks.committed_side
     return r
