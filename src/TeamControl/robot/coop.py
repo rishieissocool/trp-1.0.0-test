@@ -101,10 +101,10 @@ def _at(me, target, radius):
 
 
 def _support_pos(ball, carrier_pos):
-    """Compute a receiving position FAR AHEAD of ball, along the +x attack axis.
+    """Support position: directly ahead of ball along +x.
 
-    Support lines up well in front so the carrier makes a long forward pass.
-    Only a small lateral offset for separation — the pass is lengthways.
+    The carrier kicks straight forward, so support stands in the
+    path of the ball, far ahead, ready to receive and score.
     """
     bx, by = ball
     remaining = HALF_LEN - bx
@@ -112,13 +112,10 @@ def _support_pos(ball, carrier_pos):
                     SUP_ADVANCE_MIN, SUP_ADVANCE_MAX)
     target_x = bx + advance
 
-    # Small lateral offset to opposite side of ball-y, just for separation
-    if carrier_pos[1] >= by:
-        target_y = by - SUP_LATERAL
-    else:
-        target_y = by + SUP_LATERAL
+    # Almost no lateral offset — stay in the ball's forward path
+    # Tiny offset just so support isn't perfectly blocking carrier's shot line
+    target_y = by * 0.3  # drift toward centre, stay near ball's y
 
-    # Keep support in a scoring zone near the centre line
     target_x = clamp(target_x, -HALF_LEN + 300, HALF_LEN - 400)
     target_y = clamp(target_y, -HALF_WID + 300, HALF_WID - 300)
     return (target_x, target_y)
@@ -380,9 +377,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 w = _face(me, GOAL_TARGET)  # no ball visible, face goal
 
             # ----------------------------------------------------------
-            #  CARRIER — approach ball, decide shoot / pass / dribble
+            #  CARRIER — get behind ball, kick it FORWARD (+x)
             #
-            #  Only passes to teammate_id. All other robots are obstacles.
+            #  1. Use diamond nav to reach ball area (avoids obstacles)
+            #  2. Once close and clear, kick engine lines up behind
+            #     ball and kicks toward aim (straight +x)
             # ----------------------------------------------------------
             elif my_role == "carrier":
                 obstacles = _get_obstacles(
@@ -393,85 +392,42 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 d_ball = math.hypot(rel_ball[0], rel_ball[1])
                 dist_to_goal = _dist(me[:2], GOAL_TARGET)
 
-                # Is my teammate ahead and reachable?
-                mate_ahead = mate_pos[0] > ball[0] + 300
-                mate_reachable = (_dist(me[:2], mate_pos) < PASS_MAX_DIST
-                                  and _lane_clear(me[:2], mate_pos, obstacles))
-
-                # -- Choose aim: pass forward first, shoot only after ----
-                # Must complete at least 1 pass before shooting at goal.
-                # Always prefer a forward pass to the teammate.
+                # -- Aim: always straight forward (+x) ----------------
+                # Pass aim = point far ahead along +x, tiny y bias
+                # This makes carrier approach from behind (-x side)
+                # and kick the ball straight forward every time.
                 goal_aim = _pick_goal_aim(me)
                 can_shoot = (pass_count >= 1
                              and dist_to_goal < SHOOT_RANGE
                              and _lane_clear(me[:2], goal_aim, obstacles))
 
-                # Pass aim: aim well past mate along +x to send ball forward
-                # Flatten the y component so kick goes lengthways not sideways
-                pass_aim = (mate_pos[0] + 400, mate_pos[1] * 0.4)
-
-                if pass_count < 1 and mate_ahead and mate_reachable:
-                    # Haven't passed yet — MUST pass forward to mate
-                    aim = pass_aim
-                elif can_shoot:
+                if can_shoot:
                     aim = goal_aim
-                elif mate_ahead and mate_reachable:
-                    aim = pass_aim
                 else:
-                    # Aim straight forward (+x)
-                    aim = (min(ball[0] + 1500, HALF_LEN - 100),
-                           ball[1] * 0.2)
+                    # Aim straight forward — always +x direction
+                    aim = (ball[0] + 2000, ball[1] * 0.1)
 
-                # -- Navigate around obstacles, then kick engine ----------
-                # Use diamond nav to get near ball safely first.
-                # Only hand off to kick engine when close and path clear.
-                HANDOFF_DIST = 500  # mm — use diamond nav above this
+                # -- Get to ball safely via diamond nav ---------------
                 wp = dnav.next_waypoint(
                     frame, is_yellow, robot_id, me, ball)
-                path_blocked = (wp is not None and d_ball > HANDOFF_DIST)
+                path_clear = (wp is None)
 
-                if path_blocked and not ks.bursting:
-                    # Obstacles between me and ball — navigate around them
+                if not path_clear and d_ball > BALL_NEAR and not ks.bursting:
+                    # Far from ball and obstacles in the way — navigate
                     vx, vy = _go_to(me, wp, APPROACH_SPD,
                                     stop_r=40, ramp=400)
                     w = _face(me, ball)
-                elif bspeed > 200 and not ks.bursting:
-                    # Fast ball intercept
-                    dx = me[0] - ball[0]
-                    dy = me[1] - ball[1]
-                    dd = max(math.hypot(dx, dy), 1.0)
-                    appr = (bvx * dx + bvy * dy) / dd
-                    if appr > 150 and d_ball > KICK_RANGE:
-                        t_a = max(dd / max(bspeed, 1.0), 0.1)
-                        intercept = predict_ball(
-                            ball, (bvx, bvy), min(t_a, 1.5))
-                        dribble = 1
-                        vx, vy = _go_to(me, intercept, APPROACH_SPD,
-                                        stop_r=30, ramp=500)
-                        w = _face(me, ball)
-                    else:
-                        kr = kick_tick(ks, me, ball, aim, now,
-                                       rel_ball, d_ball)
-                        vx, vy, w = kr.vx, kr.vy, kr.w
-                        kick, dribble = kr.kick, kr.dribble
-                        if kr.kick_started:
-                            if _dist(aim, GOAL_TARGET) < 800:
-                                print(f"[coop {tag}] SHOT!")
-                            else:
-                                print(f"[coop {tag}] PASS to mate!")
-                        if kr.burst_done:
-                            ks.reset()
                 else:
-                    # Close enough and path clear — kick engine
+                    # Close to ball or path clear — kick engine
                     kr = kick_tick(ks, me, ball, aim, now,
                                    rel_ball, d_ball)
                     vx, vy, w = kr.vx, kr.vy, kr.w
                     kick, dribble = kr.kick, kr.dribble
                     if kr.kick_started:
-                        if _dist(aim, GOAL_TARGET) < 800:
+                        if can_shoot:
                             print(f"[coop {tag}] SHOT!")
                         else:
-                            print(f"[coop {tag}] PASS to mate!")
+                            print(f"[coop {tag}] PASS forward!")
                     if kr.burst_done:
                         ks.reset()
 
