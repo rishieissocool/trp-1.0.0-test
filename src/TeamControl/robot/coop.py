@@ -38,9 +38,9 @@ HOME_BLUE       = ( -400,  300)    # support starts ahead of ball
 BALL_START      = (-1300,    0)
 GOAL_TARGET     = (HALF_LEN, 0)
 
-# -- Support receiving position (fixed, ahead of ball) --------------------
-SUP_RECEIVE_X   = 500       # mm — fixed x position for receiving
-SUP_RECEIVE_Y   = 150       # mm — slight y offset so not blocking shot line
+# -- Support receiving position (fixed, well ahead of ball) ---------------
+SUP_RECEIVE_X   = 1200      # mm — far ahead so there's a real pass distance
+SUP_RECEIVE_Y   = 200       # mm — slight y offset so not blocking shot line
 
 # -- Decision thresholds -------------------------------------------------
 SHOOT_RANGE     = 1800      # mm — shoot if closer to goal than this
@@ -364,8 +364,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     ks.reset()
 
             # ----------------------------------------------------------
-            #  SUPPORT — go to receiving position, stop, face ball, wait
-            #  If ball is coming toward me, intercept it.
+            #  SUPPORT — wait at receiving position for pass.
+            #  When ball comes, intercept it. Once ball is nearby
+            #  and stopped, role will switch to carrier automatically
+            #  and kick engine takes over to score.
             # ----------------------------------------------------------
             else:
                 # Compute approach speed of ball toward me
@@ -378,7 +380,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                and dd_to_me < 3000)
 
                 if ball_coming:
-                    # Ball passed to me — intercept
+                    # Ball passed to me — intercept it
                     t_a = max(dd_to_me / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
                         ball, (bvx, bvy), min(t_a, 2.0))
@@ -387,21 +389,17 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                     stop_r=30, ramp=500)
                     w = _face(me, ball)
 
-                elif my_dist < 150:
-                    # Ball is touching me — grab it with dribbler
-                    dribble = 1
-                    vx, vy = 0.0, 0.0
-                    w = _face(me, GOAL_TARGET)
-
                 else:
                     # Go to fixed receiving position and wait
                     receive_pos = (SUP_RECEIVE_X, SUP_RECEIVE_Y)
                     d_to_pos = _dist(me[:2], receive_pos)
 
                     if d_to_pos < SUP_STOP_DIST:
-                        # At position — stand still, face ball
+                        # At position — stand still, face ball, dribbler ready
                         vx, vy = 0.0, 0.0
                         w = _face(me, ball)
+                        if my_dist < 200:
+                            dribble = 1
                     else:
                         # Move to receiving position
                         vx, vy = _go_to(me, receive_pos, APPROACH_SPD,
