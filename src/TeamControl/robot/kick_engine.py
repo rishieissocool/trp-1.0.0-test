@@ -224,16 +224,16 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     rel_nav = world2robot(me, nav)
     d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
-    if is_behind and d_nav < 250 and d_ball < BALL_NEAR:
-        # Lined up behind — charge straight at ball
+    if is_behind and d_nav < 300 and d_ball < BALL_NEAR:
+        # Lined up behind — drive straight at ball, precisely
         r.dribble = 1
-        r.vx, r.vy = move_toward(rel_ball, CHARGE_SPEED * 0.8,
-                                  ramp_dist=250, stop_dist=0)
-        r.w = clamp(ang_aim * TURN_GAIN * 0.8, -MAX_W, MAX_W)
+        r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD,
+                                  ramp_dist=200, stop_dist=0)
+        r.w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
     else:
-        # Still arcing around — navigate to behind-ball point
-        r.vx, r.vy = move_toward(rel_nav, APPROACH_SPD,
-                                  ramp_dist=350, stop_dist=10)
+        # Still getting behind — slow, precise approach
+        r.vx, r.vy = move_toward(rel_nav, DRIBBLE_SPD * 1.2,
+                                  ramp_dist=300, stop_dist=10)
         r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
         # Slow down translation when facing far from ball
         r.vx, r.vy = turn_then_move(r.vx, r.vy, r.w, abs(ang_ball))

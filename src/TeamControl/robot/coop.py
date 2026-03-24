@@ -34,9 +34,9 @@ from TeamControl.robot.constants import (
 )
 
 
-# Starting positions (setup + reset only)
-HOME_YELLOW     = (-1500, -700)
-HOME_BLUE       = (-1500,  700)
+# Starting positions — carrier behind ball, support ahead
+HOME_YELLOW     = (-1800, -200)    # carrier starts behind ball
+HOME_BLUE       = ( -400,  300)    # support starts ahead of ball
 BALL_START      = (-1300,    0)
 GOAL_TARGET     = (HALF_LEN, 0)
 
@@ -49,11 +49,11 @@ SETUP_PAUSE     = 2.0
 RESET_PAUSE     = 2.0
 CYCLE_TIMEOUT   = 15.0
 
-# -- Support positioning -------------------------------------------------
+# -- Support positioning — ahead of ball, small lateral offset -----------
 SUP_ADVANCE_FRAC = 0.55    # fraction of ball-to-goal distance to advance
-SUP_ADVANCE_MIN  = 900
-SUP_ADVANCE_MAX  = 2000
-SUP_LATERAL      = 1000    # mm lateral offset — keep robots far apart
+SUP_ADVANCE_MIN  = 1200    # minimum forward distance from ball
+SUP_ADVANCE_MAX  = 2200    # maximum forward distance from ball
+SUP_LATERAL      = 350     # mm — small lateral offset, mostly forward
 LANE_CLEARANCE   = 250     # mm obstacle clearance for pass/shot lane
 SUP_REPLAN_DIST  = 400     # mm — only replan support position when ball moves this far
 SUP_STOP_DIST    = 80      # mm — stop moving when this close to target position
@@ -101,21 +101,26 @@ def _at(me, target, radius):
 
 
 def _support_pos(ball, carrier_pos):
-    """Compute a receiving position ahead of ball, laterally offset."""
+    """Compute a receiving position FAR AHEAD of ball, along the +x attack axis.
+
+    Support lines up well in front so the carrier makes a long forward pass.
+    Only a small lateral offset for separation — the pass is lengthways.
+    """
     bx, by = ball
     remaining = HALF_LEN - bx
     advance = clamp(remaining * SUP_ADVANCE_FRAC,
                     SUP_ADVANCE_MIN, SUP_ADVANCE_MAX)
     target_x = bx + advance
 
-    # Offset to opposite side of carrier to create passing angle
+    # Small lateral offset to opposite side of ball-y, just for separation
     if carrier_pos[1] >= by:
         target_y = by - SUP_LATERAL
     else:
         target_y = by + SUP_LATERAL
 
-    target_x = clamp(target_x, -HALF_LEN + 300, HALF_LEN - 500)
-    target_y = clamp(target_y, -HALF_WID + 200, HALF_WID - 200)
+    # Keep support in a scoring zone near the centre line
+    target_x = clamp(target_x, -HALF_LEN + 300, HALF_LEN - 400)
+    target_y = clamp(target_y, -HALF_WID + 300, HALF_WID - 300)
     return (target_x, target_y)
 
 
@@ -389,25 +394,29 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 dist_to_goal = _dist(me[:2], GOAL_TARGET)
 
                 # Is my teammate ahead and reachable?
-                mate_ahead = mate_pos[0] > ball[0] + 200
+                mate_ahead = mate_pos[0] > ball[0] + 300
                 mate_reachable = (_dist(me[:2], mate_pos) < PASS_MAX_DIST
                                   and _lane_clear(me[:2], mate_pos, obstacles))
 
-                # -- Choose aim: shoot, pass to mate, or dribble -------
-                # Must complete at least 1 pass before shooting at goal
+                # -- Choose aim: pass forward first, shoot only after ----
+                # Must complete at least 1 pass before shooting at goal.
+                # Always prefer a forward pass to the teammate.
                 goal_aim = _pick_goal_aim(me)
                 can_shoot = (pass_count >= 1
                              and dist_to_goal < SHOOT_RANGE
                              and _lane_clear(me[:2], goal_aim, obstacles))
 
-                if can_shoot:
+                if pass_count < 1 and mate_ahead and mate_reachable:
+                    # Haven't passed yet — MUST pass forward to mate
+                    aim = mate_pos
+                elif can_shoot:
                     aim = goal_aim
-                elif mate_reachable:
+                elif mate_ahead and mate_reachable:
                     aim = mate_pos
                 else:
-                    # Dribble forward toward mate area if can't pass yet
-                    aim = (min(ball[0] + 1000, HALF_LEN - 100),
-                           ball[1] * 0.5)
+                    # Aim forward (+x) — kick engine will get behind ball
+                    aim = (min(ball[0] + 1500, HALF_LEN - 100),
+                           ball[1] * 0.3)
 
                 # -- Kick engine (with fast-ball intercept) -------------
                 use_ke = True
