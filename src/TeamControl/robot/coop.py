@@ -55,6 +55,7 @@ CLAIM_DIST          = 2200      # mm — ball within this = I go for it
 APPROACH_SPD        = CRUISE_SPEED
 SETUP_PAUSE         = 2.0
 RECEIVE_STOP_SPEED  = 180       # mm/s — ball "stopped" threshold for Blue
+BACKOFF_DIST        = 420       # mm — back away this far before repositioning
 REPOSITION_SWING_R  = 750       # mm — lateral swing radius around ball
 REPOSITION_BEHIND   = BEHIND_DIST + 120  # mm — lineup distance behind ball
 
@@ -287,16 +288,26 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 dribble = 1
                 w = _face(me, ball)
             else:
-                # Ball stopped — pick arc side and reposition
-                if ball[1] > HALF_WID - 500:
-                    repo_side = -1          # near top wall → swing below
-                elif ball[1] < -(HALF_WID - 500):
-                    repo_side = 1           # near bottom wall → swing above
+                # Ball stopped — back away before repositioning
+                if my_dist < BACKOFF_DIST:
+                    # Drive directly away from the ball
+                    away = world2robot(me, (me[0] + (me[0] - ball[0]),
+                                           me[1] + (me[1] - ball[1])))
+                    vx, vy = move_toward(away, APPROACH_SPD * 0.4,
+                                         ramp_dist=200, stop_dist=0)
+                    w = _face(me, ball)
+                    dribble = 0
                 else:
-                    repo_side = 1 if me[1] >= ball[1] else -1
-                mode = "reposition"
-                ks.reset()
-                print(f"[coop blue] ball stopped — repositioning (side={repo_side:+d})")
+                    # Clear — pick arc side and reposition
+                    if ball[1] > HALF_WID - 500:
+                        repo_side = -1
+                    elif ball[1] < -(HALF_WID - 500):
+                        repo_side = 1
+                    else:
+                        repo_side = 1 if me[1] >= ball[1] else -1
+                    mode = "reposition"
+                    ks.reset()
+                    print(f"[coop blue] backed off — repositioning (side={repo_side:+d})")
 
         # ==============================================================
         #  REPOSITION (Blue only) — arc around ball to line up behind it
