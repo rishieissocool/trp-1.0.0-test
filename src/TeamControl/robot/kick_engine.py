@@ -188,14 +188,16 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     # ==================================================================
     if d_ball < KICK_RANGE and rel_ball[0] > -10:
         r.dribble = 1
-        # Use charge speed to close the gap fast — don't putter around
-        drive_speed = DRIBBLE_SPD + (CHARGE_SPEED - DRIBBLE_SPD) * 0.5
+        # Decelerate as we close in — arrive at ball slowly and controlled
+        approach_t = clamp((d_ball - CONTACT_DIST) /
+                           max(KICK_RANGE - CONTACT_DIST, 1.0), 0.0, 1.0)
+        drive_speed = DRIBBLE_SPD * (0.3 + 0.7 * approach_t)
         r.vx, r.vy = move_toward(rel_ball, drive_speed,
-                                  ramp_dist=120, stop_dist=0)
+                                  ramp_dist=100, stop_dist=0)
         # Blend rotation: face ball far out, face aim when close
         blend = clamp(1.0 - d_ball / KICK_RANGE, 0.0, 1.0)
         w_ball = ang_ball * TURN_GAIN
-        w_aim = ang_aim * TURN_GAIN * 1.2
+        w_aim = ang_aim * TURN_GAIN * 1.5
         r.w = clamp(w_ball * (1.0 - blend) + w_aim * blend,
                      -MAX_W, MAX_W)
 

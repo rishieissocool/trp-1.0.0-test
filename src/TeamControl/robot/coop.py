@@ -406,17 +406,21 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                              and dist_to_goal < SHOOT_RANGE
                              and _lane_clear(me[:2], goal_aim, obstacles))
 
+                # Pass aim: aim slightly past mate to send ball forward
+                # This flattens the angle so the kick is more lengthways
+                pass_aim = (mate_pos[0] + 200, mate_pos[1] * 0.7)
+
                 if pass_count < 1 and mate_ahead and mate_reachable:
                     # Haven't passed yet — MUST pass forward to mate
-                    aim = mate_pos
+                    aim = pass_aim
                 elif can_shoot:
                     aim = goal_aim
                 elif mate_ahead and mate_reachable:
-                    aim = mate_pos
+                    aim = pass_aim
                 else:
-                    # Aim forward (+x) — kick engine will get behind ball
+                    # Aim straight forward (+x)
                     aim = (min(ball[0] + 1500, HALF_LEN - 100),
-                           ball[1] * 0.3)
+                           ball[1] * 0.2)
 
                 # -- Kick engine (with fast-ball intercept) -------------
                 use_ke = True
