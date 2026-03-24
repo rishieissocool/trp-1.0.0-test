@@ -360,12 +360,12 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             rel_aim = world2robot(me, aim)
             ang_to_aim = math.atan2(rel_aim[1], rel_aim[0])
 
-            # Completely stopped — only rotate, very slow
+            # Completely stopped — only rotate
             vx, vy = 0.0, 0.0
-            w = clamp(ang_to_aim * TURN_GAIN * 0.25, -MAX_W * 0.3, MAX_W * 0.3)
+            w = clamp(ang_to_aim * TURN_GAIN * 0.7, -MAX_W * 0.65, MAX_W * 0.65)
             kick, dribble = 0, 0
 
-            if abs(ang_to_aim) < 0.05:   # ~3 deg — precise enough
+            if abs(ang_to_aim) < 0.025:   # ~1.4 deg — precise
                 mode = "active"
                 ks.reset()
                 print(f"[coop blue] aligned — shooting!")
