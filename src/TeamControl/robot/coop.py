@@ -365,6 +365,20 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             else:
                 aim = (HALF_LEN, 0)
 
+            # Blue: rotate in place to face goal before approaching
+            if not is_yellow and not ks.bursting:
+                rel_aim = world2robot(me, aim)
+                ang_to_aim = math.atan2(rel_aim[1], rel_aim[0])
+                if abs(ang_to_aim) > 0.18:   # ~10 deg
+                    w = clamp(ang_to_aim * TURN_GAIN * 1.5, -MAX_W, MAX_W)
+                    vx, vy, kick, dribble = 0.0, 0.0, 0, 0
+                    cmd = RobotCommand(robot_id=robot_id, vx=vx, vy=vy, w=w,
+                                       kick=kick, dribble=dribble,
+                                       isYellow=is_yellow)
+                    dispatch_q.put((cmd, 0.15))
+                    time.sleep(LOOP_RATE)
+                    continue
+
             # Intercept fast incoming ball
             rel_ball = world2robot(me, ball)
             d_ball = math.hypot(rel_ball[0], rel_ball[1])
