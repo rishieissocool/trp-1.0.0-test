@@ -369,8 +369,8 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             if not is_yellow and not ks.bursting:
                 rel_aim = world2robot(me, aim)
                 ang_to_aim = math.atan2(rel_aim[1], rel_aim[0])
-                if abs(ang_to_aim) > 0.18:   # ~10 deg
-                    w = clamp(ang_to_aim * TURN_GAIN * 1.5, -MAX_W, MAX_W)
+                if abs(ang_to_aim) > 0.06:   # ~3.5 deg
+                    w = clamp(ang_to_aim * TURN_GAIN * 0.5, -MAX_W, MAX_W)
                     vx, vy, kick, dribble = 0.0, 0.0, 0, 0
                     cmd = RobotCommand(robot_id=robot_id, vx=vx, vy=vy, w=w,
                                        kick=kick, dribble=dribble,
