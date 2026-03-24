@@ -19,7 +19,6 @@ from TeamControl.robot.striker import run_striker
 from TeamControl.robot.navigator import run_navigator, WAYPOINTS_A, WAYPOINTS_B
 from TeamControl.robot.team import run_team
 from TeamControl.robot.coop import run_coop
-from TeamControl.robot.duel import run_duel
 
 
 def main():
@@ -85,17 +84,15 @@ def main():
                           0, not preset.us_yellow)))
 
     elif args.mode == "1v1":
-        # Yellow vs blue — each attacks the other's goal
+        # Yellow striker (robot 0) vs blue striker (robot 0)
         foreground.append(
-            Process(target=run_duel,
+            Process(target=run_striker,
                     args=(is_running, dispatch_q, wm,
-                          0, 0, True),
-                    kwargs=dict(opp_is_yellow=False)))
+                          0, True)))
         foreground.append(
-            Process(target=run_duel,
+            Process(target=run_striker,
                     args=(is_running, dispatch_q, wm,
-                          0, 0, False),
-                    kwargs=dict(opp_is_yellow=True)))
+                          0, False)))
 
     elif args.mode == "obstacle":
         # Two robots chasing ball with obstacle avoidance
