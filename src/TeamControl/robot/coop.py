@@ -1,8 +1,9 @@
 """
-Cooperative pass-and-score drill — yellow passes to blue, blue scores.
+Cooperative pass-and-shoot drill.
 
-Yellow in left half, blue in right half. Yellow passes to blue,
-then blue shoots at the right-side goal (+x). Resets after each goal.
+Yellow (left) passes to Blue (right), then Blue receives and shoots
+at the right-side goal (positive x).  Uses the shared kick_engine
+for approach, alignment, and sustained kick bursts.
 
 Field is 4500 x 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -31,19 +32,19 @@ from TeamControl.robot.constants import (
 
 
 # =====================================================================
-#  LAYOUT
+#  LAYOUT — pass-and-shoot drill
 #
 #       y
 #    +1115 +----------------------------------------------+
 #          |                                              |
-#        0 |  [YELLOW]  --pass-->  [BLUE]  --shoot--> [GOAL]
-#          | (-1800,0)           (1800,0)            (+2250)
+#        0 |  [YELLOW]    -- pass -->  [BLUE] --> [GOAL]  |
+#          | (-1800,0)               (1800,0)    (+2250)  |
 #          |                                              |
 #    -1115 +----------------------------------------------+
 #        -2250              0               +2250  x
+#
+#  Yellow passes to Blue, Blue shoots at the right goal.
 # =====================================================================
-
-GOAL_TARGET = (HALF_LEN, 0)   # centre of the right-side goal
 
 HOME_YELLOW     = (-1800, 0)
 HOME_BLUE       = (1800, 0)
@@ -251,7 +252,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # ==============================================================
         #  ACTIVE — kick engine handles everything
-        #  yellow aims at mate (pass), blue aims at goal (shoot)
+        #  Yellow aims at mate (pass), Blue aims at goal (shoot)
         # ==============================================================
         elif mode == "active":
             if ball is None:
@@ -267,9 +268,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 time.sleep(LOOP_RATE)
                 continue
 
-            # Yellow passes to mate, blue shoots at goal
-            aim = mate_pos if is_yellow else GOAL_TARGET
-            kick_label = "pass" if is_yellow else "SHOT"
+            # Yellow passes to teammate, Blue shoots at right goal
+            if is_yellow:
+                aim = mate_pos
+            else:
+                aim = (HALF_LEN, 0)
 
             # Intercept fast incoming ball
             rel_ball = world2robot(me, ball)
@@ -294,22 +297,24 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     kick, dribble = kr.kick, kr.dribble
                     if kr.kick_started:
                         pass_count += 1
-                        print(f"[coop {tag}] KICKING {kick_label} #{pass_count}!")
+                        action = "PASSING" if is_yellow else "SHOOTING"
+                        print(f"[coop {tag}] {action} #{pass_count}!")
                     if kr.burst_done:
-                        mode = "reset" if not is_yellow else "retreat"
+                        mode = "retreat"
                         ks.reset()
-                        print(f"[coop {tag}] kick done")
+                        print(f"[coop {tag}] kick done — retreating")
             else:
                 kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
                 vx, vy, w = kr.vx, kr.vy, kr.w
                 kick, dribble = kr.kick, kr.dribble
                 if kr.kick_started:
                     pass_count += 1
-                    print(f"[coop {tag}] KICKING {kick_label} #{pass_count}!")
+                    action = "PASSING" if is_yellow else "SHOOTING"
+                    print(f"[coop {tag}] {action} #{pass_count}!")
                 if kr.burst_done:
-                    mode = "reset" if not is_yellow else "retreat"
+                    mode = "retreat"
                     ks.reset()
-                    print(f"[coop {tag}] kick done")
+                    print(f"[coop {tag}] kick done — retreating")
 
         # ==============================================================
         #  RETREAT — go home, but intercept if ball incoming
@@ -334,29 +339,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 mode = "home"
                 ks.reset()
                 print(f"[coop {tag}] home — waiting")
-
-        # ==============================================================
-        #  RESET — blue scored, wait a beat then restart the drill
-        # ==============================================================
-        elif mode == "reset":
-            vx, vy = _go_to(me, home, APPROACH_SPD)
-            w = _face(me, (0, 0))
-
-            if _at(me, home, 300):
-                if sim:
-                    try:
-                        pkt = grSimPacketFactory.ball_replacement_command(
-                            x=BALL_START[0] / 1000.0,
-                            y=BALL_START[1] / 1000.0,
-                            vx=0.0, vy=0.0)
-                        sim.send_packet(pkt)
-                        print(f"[coop {tag}] ball reset at {BALL_START}")
-                    except Exception:
-                        pass
-                time.sleep(0.5)
-                mode = "home"
-                ks.reset()
-                print(f"[coop {tag}] drill reset — ready")
 
         # -- Obstacle avoidance (all modes except kicking burst) --------
         if not ks.bursting:
