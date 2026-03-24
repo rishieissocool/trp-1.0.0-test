@@ -143,7 +143,11 @@ def _steer_around(me, goal, blocker):
 
 
 def _get_all_obstacles(frame, is_yellow, robot_id, exclude_ids):
-    """Get (cx, cy, radius) for every robot on field except self and excludes."""
+    """Get (cx, cy, radius) for every robot on field except self and excludes.
+
+    Filters out phantom robots (confidence too low or sitting at origin)
+    which grSim reports for inactive robot slots.
+    """
     obstacles = []
     for color in (True, False):
         for oid in range(16):
@@ -155,12 +159,19 @@ def _get_all_obstacles(frame, is_yellow, robot_id, exclude_ids):
                 other = frame.get_yellow_robots(isYellow=color, robot_id=oid)
                 if isinstance(other, int) or other is None:
                     continue
+                # Skip phantom robots — low confidence or parked at origin
+                if hasattr(other, 'confidence') and other.confidence < 0.1:
+                    continue
                 op = other.position
+                ox, oy = float(op[0]), float(op[1])
+                # Robots sitting exactly at origin are almost certainly phantoms
+                if abs(ox) < 1 and abs(oy) < 1:
+                    continue
                 # Use obstacle radius if available, otherwise default 90mm
                 rad = 90
                 if hasattr(other, 'obstacle') and other.obstacle is not None:
                     rad = other.obstacle.radius
-                obstacles.append((float(op[0]), float(op[1]), rad))
+                obstacles.append((ox, oy, rad))
             except Exception:
                 continue
     return obstacles

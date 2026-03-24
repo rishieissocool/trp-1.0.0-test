@@ -156,15 +156,14 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         if ks.near_ball_since == 0.0:
             ks.near_ball_since = now
         time_near = now - ks.near_ball_since
-        force_kick = time_near > FORCE_KICK_TIME
         can_kick = (now - ks.last_kick) > KICK_COOLDOWN
         aligned = abs(ang_aim) < KICK_ALIGN_TOL
 
-        # Also kick if we've been near long enough and roughly aligned
-        roughly_aligned = abs(ang_aim) < KICK_ALIGN_TOL * 3.0
-        patient_kick = time_near > (FORCE_KICK_TIME * 0.7) and roughly_aligned
+        # Force kick only as absolute last resort, and still require rough alignment
+        force_kick = (time_near > FORCE_KICK_TIME
+                      and abs(ang_aim) < KICK_ALIGN_TOL * 2.0)
 
-        if can_kick and (aligned or force_kick or patient_kick):
+        if can_kick and (aligned or force_kick):
             # Start kick burst
             ks.bursting = True
             ks.kick_end_time = now + KICK_BURST_T
@@ -227,8 +226,8 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
     # Check if we're truly behind: ball must be in front of us AND
-    # we must be roughly facing the aim direction
-    facing_aim = abs(ang_aim) < 0.4  # ~23 deg tolerance
+    # we must be tightly facing the aim direction
+    facing_aim = abs(ang_aim) < 0.20  # ~11 deg — must be nearly straight behind
     ball_in_front = rel_ball[0] > 0
 
     if is_behind and d_nav < 300 and d_ball < BALL_NEAR and facing_aim and ball_in_front:

@@ -122,7 +122,8 @@ def _support_pos(ball, carrier_pos):
 
 
 def _get_obstacles(frame, my_yellow, my_id, mate_yellow, mate_id):
-    """Positions of every robot except me and my teammate."""
+    """Positions of every robot except me and my teammate.
+    Filters out phantom robots sitting at origin."""
     obs = []
     for is_y in (True, False):
         for rid in range(6):
@@ -132,6 +133,9 @@ def _get_obstacles(frame, my_yellow, my_id, mate_yellow, mate_id):
                 continue
             r = _get_robot(frame, is_y, rid)
             if r is not None:
+                # Skip phantoms at origin
+                if abs(r[0]) < 1 and abs(r[1]) < 1:
+                    continue
                 obs.append((r[0], r[1]))
     return obs
 
