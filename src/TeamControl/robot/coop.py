@@ -55,9 +55,9 @@ CLAIM_DIST          = 2200      # mm — ball within this = I go for it
 APPROACH_SPD        = CRUISE_SPEED
 SETUP_PAUSE         = 2.0
 RECEIVE_STOP_SPEED  = 180       # mm/s — ball "stopped" threshold for Blue
-BACKOFF_DIST        = 420       # mm — back away this far before repositioning
-REPOSITION_SWING_R  = 750       # mm — lateral swing radius around ball
-REPOSITION_BEHIND   = BEHIND_DIST + 450  # mm — lineup distance behind ball
+BACKOFF_DIST        = 420       # mm — back away from ball before repositioning
+REPO_LATERAL_R      = 950       # mm — how far out to the side Blue arcs
+REPO_BEHIND_R       = 700       # mm — how far behind ball Blue lines up
 
 # Exported for UI overlay
 ATK_START       = HOME_YELLOW
@@ -157,7 +157,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     last_ball_xy = None
 
     ks = KickState()
-    repo_side = 1      # +1 / -1 — which side Blue swings around ball
+    repo_side  = 1     # +1 / -1 — which side Blue arcs around ball
+    repo_phase = 1     # 1 = go to lateral waypoint, 2 = go to behind point
+    repo_ball  = None  # ball position locked when reposition starts
 
     while is_running.is_set():
         now = time.time()
@@ -298,19 +300,23 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     w = _face(me, ball)
                     dribble = 0
                 else:
-                    # Clear — pick arc side and reposition
+                    # Clear — lock ball position, pick side, start arc
                     if ball[1] > HALF_WID - 500:
                         repo_side = -1
                     elif ball[1] < -(HALF_WID - 500):
                         repo_side = 1
                     else:
                         repo_side = 1 if me[1] >= ball[1] else -1
+                    repo_ball  = ball
+                    repo_phase = 1
                     mode = "reposition"
                     ks.reset()
-                    print(f"[coop blue] backed off — repositioning (side={repo_side:+d})")
+                    print(f"[coop blue] backed off — arc side={repo_side:+d}")
 
         # ==============================================================
-        #  REPOSITION (Blue only) — arc around ball to line up behind it
+        #  REPOSITION (Blue only) — explicit two-phase wide arc
+        #    phase 1: drive far out to the side of the ball
+        #    phase 2: drive straight behind the ball
         # ==============================================================
         elif mode == "reposition":
             if ball is None:
@@ -318,40 +324,28 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 time.sleep(LOOP_RATE)
                 continue
 
-            # Direction ball → goal
-            gdx = HALF_LEN - ball[0]
-            gdy = 0.0   - ball[1]
-            gd  = max(math.hypot(gdx, gdy), 1.0)
-            ux, uy = gdx / gd, gdy / gd     # unit vec toward goal
+            bx, by = repo_ball   # locked — does not drift with ball
 
-            # Target: directly behind ball (away from goal)
-            behind_pt = (ball[0] - ux * REPOSITION_BEHIND,
-                         ball[1] - uy * REPOSITION_BEHIND)
+            # Two fixed waypoints
+            lateral_pt = (bx, by + repo_side * REPO_LATERAL_R)
+            behind_pt  = (bx - REPO_BEHIND_R, by)
 
-            d_behind = _dist(me, behind_pt)
-
-            # Drive toward behind point — slow and deliberate
-            rel_nav = world2robot(me, behind_pt)
-            vx, vy = move_toward(rel_nav, APPROACH_SPD * 0.35, ramp_dist=300, stop_dist=30)
-            w = _face(me, ball)
             dribble = 0
+            w = _face(me, (bx, by))
 
-            # Gentle ball repulsion — nudges Blue around the ball
-            if my_dist < REPOSITION_SWING_R:
-                push = APPROACH_SPD * 0.5 * (1.0 - my_dist / REPOSITION_SWING_R)
-                away_x = (me[0] - ball[0]) / max(my_dist, 1.0)
-                away_y = (me[1] - ball[1]) / max(my_dist, 1.0)
-                # Bias toward chosen side so the arc is consistent
-                perp_x = -away_y * repo_side
-                perp_y =  away_x * repo_side
-                vx += (away_x * 0.55 + perp_x * 0.45) * push
-                vy += (away_y * 0.55 + perp_y * 0.45) * push
-
-            # In position — stop and align before shooting
-            if d_behind < 220:
-                mode = "prealign"
-                ks.reset()
-                print(f"[coop blue] in position — aligning to goal")
+            if repo_phase == 1:
+                vx, vy = _go_to(me, lateral_pt, APPROACH_SPD * 0.5,
+                                stop_r=100, ramp=400)
+                if _at(me, lateral_pt, 130):
+                    repo_phase = 2
+                    print(f"[coop blue] lateral reached — heading behind ball")
+            else:
+                vx, vy = _go_to(me, behind_pt, APPROACH_SPD * 0.5,
+                                stop_r=80, ramp=400)
+                if _at(me, behind_pt, 150):
+                    mode = "prealign"
+                    ks.reset()
+                    print(f"[coop blue] in position — aligning to goal")
 
         # ==============================================================
         #  PREALIGN (Blue only) — full stop, rotate precisely to goal
