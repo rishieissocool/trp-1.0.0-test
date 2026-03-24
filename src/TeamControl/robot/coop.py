@@ -19,7 +19,7 @@ from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
     turn_then_move, ball_velocity, update_ball_history, predict_ball,
 )
-from TeamControl.robot.kick_engine import KickState, kick_tick
+# kick_engine no longer used — carrier logic is inline
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.robot.constants import (
@@ -287,7 +287,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
     ball_history = []
     last_ball_xy = None
-    ks = KickState()
+
+    # Kick state — simple, no kick engine
+    last_kick_time = 0.0
+    kick_burst_end = 0.0
+    bursting = False
 
     # Pass tracking — must complete at least 1 pass before shooting
     pass_count = 0
@@ -345,7 +349,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 print(f"[coop {tag}] GOAL! (cycle {cycle_count}, passes={pass_count})")
                 mode = "reset"
                 reset_time = now
-                ks.reset()
+                bursting = False
                 pass_count = 0
                 kicked = False
 
@@ -354,29 +358,26 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             print(f"[coop {tag}] timeout — resetting")
             mode = "reset"
             reset_time = now
-            ks.reset()
+            bursting = False
             pass_count = 0
             kicked = False
 
         # -- Role determination (play mode only) ------------------------
         if mode == "play" and ball is not None:
             if kicked:
-                # Already kicked — stay as support, retreat
                 my_role = "support"
-            elif ks.bursting:
-                pass  # don't switch during kick
+            elif bursting:
+                pass
             elif my_dist < mate_dist - CARRIER_MARGIN:
                 if my_role != "carrier":
                     if prev_role == "support":
                         pass_count += 1
                         print(f"[coop {tag}] pass received! (count={pass_count})")
                     my_role = "carrier"
-                    ks.reset()
                     print(f"[coop {tag}] -> carrier")
             elif mate_dist < my_dist - CARRIER_MARGIN:
                 if my_role != "support":
                     my_role = "support"
-                    ks.reset()
                     print(f"[coop {tag}] -> support")
             prev_role = my_role
 
@@ -411,42 +412,82 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 w = _face(me, GOAL_TARGET)
 
             # ----------------------------------------------------------
-            #  CARRIER — go to ball, get possession, kick to teammate
-            #  Simple: just use kick engine directly. It handles
-            #  getting behind the ball and kicking toward aim.
+            #  CARRIER — same approach as right-click "go to ball"
+            #
+            #  Far:   drive to ball fast, face ball
+            #  Mid:   slow down, dribble, start facing aim
+            #  Close: dribble, rotate toward aim, kick when aligned
+            #  Burst: hold kick for a bit so grSim registers
             # ----------------------------------------------------------
             elif my_role == "carrier":
                 rel_ball = world2robot(me, ball)
                 d_ball = math.hypot(rel_ball[0], rel_ball[1])
+                ang_ball = math.atan2(rel_ball[1], rel_ball[0])
                 dist_to_goal = _dist(me[:2], GOAL_TARGET)
 
-                # Decide aim
+                # Decide aim target
                 goal_aim = _pick_goal_aim(me)
                 can_shoot = (pass_count >= 1 and dist_to_goal < SHOOT_RANGE)
+                aim = goal_aim if can_shoot else (mate_pos[0], mate_pos[1])
 
-                if can_shoot:
-                    aim = goal_aim
+                rel_aim = world2robot(me, aim)
+                ang_aim = math.atan2(rel_aim[1], rel_aim[0])
+
+                # --- Kick burst in progress ---
+                if bursting:
+                    kick = 1
+                    dribble = 1
+                    vx = 0.3
+                    vy = 0.0
+                    w = clamp(ang_aim * 0.5, -MAX_W, MAX_W)
+                    if now > kick_burst_end:
+                        bursting = False
+                        if not can_shoot:
+                            kicked = True
+                            my_role = "support"
+                            print(f"[coop {tag}] kicked, retreating")
+
+                # --- Far from ball (>600mm) — cruise toward it ---
+                elif d_ball > 600:
+                    vx, vy = move_toward(rel_ball, 0.6,
+                                         ramp_dist=800, stop_dist=250)
+                    w = clamp(ang_ball * 0.6, -MAX_W, MAX_W)
+
+                # --- Mid range (>130mm) — slow + dribble ---
+                elif d_ball > 130:
+                    dribble = 1
+                    vx, vy = move_toward(rel_ball, 0.25,
+                                         ramp_dist=400, stop_dist=60)
+                    # Blend facing: mostly ball, some aim
+                    w = clamp(ang_ball * 0.5 + ang_aim * 0.2,
+                              -MAX_W, MAX_W)
+
+                # --- Close (<130mm) — rotate to aim, kick when ready ---
                 else:
-                    # Must pass — aim at teammate
-                    aim = (mate_pos[0], mate_pos[1])
+                    dribble = 1
+                    # Gentle forward pressure to keep ball on dribbler
+                    vx = 0.08
+                    vy = clamp(rel_ball[1] * 0.3, -0.06, 0.06)
+                    # Rotate to face aim
+                    w = clamp(ang_aim * 1.2, -MAX_W, MAX_W)
 
-                # Kick engine handles everything: approach, get behind, kick
-                kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
-                vx, vy, w = kr.vx, kr.vy, kr.w
-                kick, dribble = kr.kick, kr.dribble
+                    # Kick when roughly aligned — don't wait for perfect
+                    can_kick = (now - last_kick_time) > KICK_COOLDOWN
+                    aligned = abs(ang_aim) < 0.35  # ~20 deg — good enough
+                    waited = d_ball < 130 and abs(ang_aim) < 0.8  # force after a bit
 
-                if kr.kick_started:
-                    if can_shoot:
-                        print(f"[coop {tag}] SHOT!")
-                    else:
-                        print(f"[coop {tag}] PASS to mate!")
-                if kr.burst_done:
-                    ks.reset()
-                    if not can_shoot:
-                        # Passed — immediately retreat, let mate score
-                        kicked = True
-                        my_role = "support"
-                        print(f"[coop {tag}] kicked, retreating")
+                    if can_kick and (aligned or waited):
+                        kick = 1
+                        dribble = 0
+                        vx = 0.3
+                        vy = 0.0
+                        bursting = True
+                        kick_burst_end = now + 0.5
+                        last_kick_time = now
+                        if can_shoot:
+                            print(f"[coop {tag}] SHOT!")
+                        else:
+                            print(f"[coop {tag}] PASS to mate!")
 
             # ----------------------------------------------------------
             #  SUPPORT
@@ -533,12 +574,12 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 prev_role = my_role
                 pass_count = 0
                 kicked = False
-                ks.reset()
+                bursting = False
                 ball_history.clear()
                 print(f"[coop {tag}] next cycle")
 
         # -- Avoid all robots on field (static obstacles + teammate) -----
-        if not ks.bursting:
+        if not bursting:
             avoid_vx, avoid_vy = _avoid_all_robots(
                 me, frame, is_yellow, robot_id,
                 mate_is_yellow, teammate_id)
