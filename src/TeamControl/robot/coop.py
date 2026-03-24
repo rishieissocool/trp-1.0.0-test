@@ -295,6 +295,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
                     vx, vy, w = kr.vx, kr.vy, kr.w
                     kick, dribble = kr.kick, kr.dribble
+                    # Blue: no dribble while circling — only during burst
+                    if not is_yellow and not ks.bursting:
+                        dribble = 0
                     if kr.kick_started:
                         pass_count += 1
                         action = "PASSING" if is_yellow else "SHOOTING"
@@ -307,6 +310,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
                 vx, vy, w = kr.vx, kr.vy, kr.w
                 kick, dribble = kr.kick, kr.dribble
+                # Blue: no dribble while circling — only during burst
+                if not is_yellow and not ks.bursting:
+                    dribble = 0
                 if kr.kick_started:
                     pass_count += 1
                     action = "PASSING" if is_yellow else "SHOOTING"
