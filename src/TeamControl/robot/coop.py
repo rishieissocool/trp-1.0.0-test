@@ -57,7 +57,7 @@ SETUP_PAUSE         = 2.0
 RECEIVE_STOP_SPEED  = 180       # mm/s — ball "stopped" threshold for Blue
 BACKOFF_DIST        = 420       # mm — back away this far before repositioning
 REPOSITION_SWING_R  = 750       # mm — lateral swing radius around ball
-REPOSITION_BEHIND   = BEHIND_DIST + 120  # mm — lineup distance behind ball
+REPOSITION_BEHIND   = BEHIND_DIST + 450  # mm — lineup distance behind ball
 
 # Exported for UI overlay
 ATK_START       = HOME_YELLOW
@@ -366,9 +366,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             rel_aim = world2robot(me, aim)
             ang_to_aim = math.atan2(rel_aim[1], rel_aim[0])
 
-            # Completely stopped — only rotate
+            # Completely stopped — only rotate, very slow
             vx, vy = 0.0, 0.0
-            w = clamp(ang_to_aim * TURN_GAIN * 0.4, -MAX_W, MAX_W)
+            w = clamp(ang_to_aim * TURN_GAIN * 0.25, -MAX_W * 0.3, MAX_W * 0.3)
             kick, dribble = 0, 0
 
             if abs(ang_to_aim) < 0.05:   # ~3 deg — precise enough
