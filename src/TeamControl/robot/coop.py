@@ -543,11 +543,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             vx = vx / spd * max_spd
             vy = vy / spd * max_spd
 
-        # -- Turn-then-move: slow down when facing away from target ------
-        if ball is not None and not ks.bursting:
-            rel_face = world2robot(me, ball)
-            ang_err = abs(math.atan2(rel_face[1], rel_face[0]))
-            vx, vy = turn_then_move(vx, vy, w, ang_err)
+        # turn_then_move removed — kick engine handles its own approach
+        # and applying it here killed velocity when robot needed to go
+        # away from ball to get behind it
 
         # -- Wall braking -----------------------------------------------
         vx, vy = wall_brake(me[0], me[1], vx, vy)
