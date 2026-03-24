@@ -34,7 +34,7 @@ from TeamControl.robot.constants import (
 CONTACT_DIST    = 145       # mm — ball touching dribbler
 KICK_ALIGN_TOL  = 0.10      # rad (~6 deg) — tight alignment for precise kicks
 KICK_BURST_T    = 0.55      # s — sustain kick=1 longer so grSim reliably registers
-FORCE_KICK_TIME = 2.5       # s — be patient, wait for proper alignment
+FORCE_KICK_TIME = 1.5       # s — don't wait too long, just kick
 DRIBBLE_SPD     = DRIBBLE_SPEED
 APPROACH_SPD    = CRUISE_SPEED
 
@@ -159,11 +159,13 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         can_kick = (now - ks.last_kick) > KICK_COOLDOWN
         aligned = abs(ang_aim) < KICK_ALIGN_TOL
 
-        # Force kick only as absolute last resort, and still require rough alignment
-        force_kick = (time_near > FORCE_KICK_TIME
-                      and abs(ang_aim) < KICK_ALIGN_TOL * 2.0)
+        # Kick if roughly aligned after a short wait
+        roughly_aligned = abs(ang_aim) < KICK_ALIGN_TOL * 3.0
+        patient_kick = time_near > 0.8 and roughly_aligned
+        # Force kick as last resort
+        force_kick = time_near > FORCE_KICK_TIME
 
-        if can_kick and (aligned or force_kick):
+        if can_kick and (aligned or patient_kick or force_kick):
             # Start kick burst
             ks.bursting = True
             ks.kick_end_time = now + KICK_BURST_T
@@ -225,26 +227,29 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     rel_nav = world2robot(me, nav)
     d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
-    # Check if we're truly behind: ball must be in front of us AND
-    # we must be facing the aim direction
-    facing_aim = abs(ang_aim) < 0.30  # ~17 deg — straight behind but not so tight it oscillates
+    # Check if roughly behind: ball in front and we're somewhat facing aim
+    facing_aim = abs(ang_aim) < 0.50  # ~29 deg — loose enough to commit
     ball_in_front = rel_ball[0] > 0
 
-    if is_behind and d_nav < 300 and d_ball < BALL_NEAR and facing_aim and ball_in_front:
-        # Properly behind and aligned — drive straight at ball
+    if is_behind and d_ball < BALL_NEAR and facing_aim and ball_in_front:
+        # Roughly behind — drive straight at ball, correct aim on the way
+        r.dribble = 1
+        r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD,
+                                  ramp_dist=200, stop_dist=0)
+        r.w = clamp(ang_aim * TURN_GAIN * 1.5, -MAX_W, MAX_W)
+    elif d_ball < BALL_NEAR and ball_in_front and abs(ang_ball) < 0.3:
+        # Close and ball is in front — just go for it even if not perfectly behind
         r.dribble = 1
         r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD,
                                   ramp_dist=200, stop_dist=0)
         r.w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
     else:
-        # Not behind yet — keep arcing, go slow
-        r.vx, r.vy = move_toward(rel_nav, DRIBBLE_SPD * 1.0,
+        # Not behind yet — arc around
+        r.vx, r.vy = move_toward(rel_nav, DRIBBLE_SPD,
                                   ramp_dist=300, stop_dist=10)
-        # Face the ball while getting into position
         r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-        # Almost stop when facing far from ball — turn first, then move
         r.vx, r.vy = turn_then_move(r.vx, r.vy, r.w, abs(ang_ball),
-                                     threshold=0.25)
+                                     threshold=0.3)
 
     r.committed_side = ks.committed_side
     return r
