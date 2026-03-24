@@ -23,8 +23,7 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.ball_nav import compute_arc_nav, predict_ball as _predict_ball, turn_then_move
-from TeamControl.robot.diamond_nav import DiamondNav
+from TeamControl.robot.ball_nav import compute_arc_nav, predict_ball as _predict_ball
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -709,9 +708,6 @@ def _cmd(rid, rpos, target, face, speed, kick, dribble, yellow,
     ang = math.atan2(rel_f[1], rel_f[0])
     w = 0.0 if abs(ang) < 0.04 else _cl(ang * TURN_GAIN, -MAX_W, MAX_W)
 
-    # Turn-then-move: slow down translation when facing far from target
-    vx, vy = turn_then_move(vx, vy, w, abs(ang))
-
     return RobotCommand(robot_id=rid, vx=vx, vy=vy, w=w,
                         kick=kick, dribble=dribble, isYellow=yellow)
 
@@ -1015,7 +1011,6 @@ def run_team(is_running, dispatch_q, wm, is_yellow, goalie_id=0):
     winner_since = 0.0
     poss        = _PossessionTracker()
     committed_sides = {}   # robot_id → committed arc side (+1/-1 or None)
-    diamond_navs = {}      # robot_id → DiamondNav instance
 
     while is_running.is_set():
         now = time.time()
@@ -1133,25 +1128,13 @@ def run_team(is_running, dispatch_q, wm, is_yellow, goalie_id=0):
             elif rid in sup_ids:
                 fb = _safe_pos(ball[0], ball[1] + 1500, our_gx, opp_gx)
                 tgt = sup_tgts.get(rid, fb)
-                # Diamond path planning for support movement
-                if rid not in diamond_navs:
-                    diamond_navs[rid] = DiamondNav()
-                wp = diamond_navs[rid].next_waypoint(
-                    frame, is_yellow, rid, rpos, tgt)
-                nav_tgt = wp if wp is not None else tgt
-                c = _support(rid, rpos, ball, nav_tgt, our_gx, opp_gx,
+                c = _support(rid, rpos, ball, tgt, our_gx, opp_gx,
                              is_yellow, poss.state)
                 committed_sides.pop(rid, None)  # reset when not attacking
             elif rid in def_ids:
                 fb = _safe_pos_def(our_gx, 0, our_gx, opp_gx)
                 tgt = def_tgts.get(rid, fb)
-                # Diamond path planning for defender movement
-                if rid not in diamond_navs:
-                    diamond_navs[rid] = DiamondNav()
-                wp = diamond_navs[rid].next_waypoint(
-                    frame, is_yellow, rid, rpos, tgt)
-                nav_tgt = wp if wp is not None else tgt
-                c = _defender(rid, rpos, ball, nav_tgt, our_gx, opp_gx,
+                c = _defender(rid, rpos, ball, tgt, our_gx, opp_gx,
                               is_yellow, poss.state)
                 committed_sides.pop(rid, None)
             else:

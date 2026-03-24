@@ -18,11 +18,10 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
-    turn_then_move, ball_velocity, update_ball_history, predict_ball,
+    ball_velocity, update_ball_history, predict_ball,
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
-from TeamControl.robot.diamond_nav import DiamondNav
 from TeamControl.robot.constants import (
     FIELD_LENGTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -119,7 +118,6 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     last_ball_xy = None
 
     ks = KickState()
-    dnav = DiamondNav()
 
     while is_running.is_set():
         now = time.time()
@@ -226,15 +224,10 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             sy = max(-HALF_WID + 150, min(HALF_WID - 150, sy))
 
             shadow_pt = (sx, sy)
-            # Use diamond planner to navigate around obstacles to shadow position
-            wp = dnav.next_waypoint(frame, is_yellow, robot_id, rpos, shadow_pt)
-            nav_target = wp if wp is not None else shadow_pt
-            rel_shadow = world2robot(rpos, nav_target)
+            rel_shadow = world2robot(rpos, shadow_pt)
             vx, vy = move_toward(rel_shadow, SHADOW_SPD,
                                   ramp_dist=400, stop_dist=80)
-            rel_b = world2robot(rpos, ball)
-            ang_b = math.atan2(rel_b[1], rel_b[0])
-            w = clamp(ang_b * TURN_GAIN, -MAX_W, MAX_W)
+            w = _face(rpos, ball)
 
             # If ball comes toward me (opponent kicked/lost), intercept
             if bspeed > 200:
@@ -249,9 +242,7 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                     rel_int = world2robot(rpos, intercept)
                     vx, vy = move_toward(rel_int, APPROACH_SPD,
                                           ramp_dist=500, stop_dist=30)
-                    rel_b2 = world2robot(rpos, ball)
-                    ang_b2 = math.atan2(rel_b2[1], rel_b2[0])
-                    w = clamp(ang_b2 * TURN_GAIN, -MAX_W, MAX_W)
+                    w = _face(rpos, ball)
 
         # ==============================================================
         #  POSSESS — ball is mine or loose, kick engine handles it
@@ -277,10 +268,6 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                 w = 0.0
             else:
                 w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-
-        # -- Turn-then-move: slow down when facing away from target ------
-        if not ks.bursting:
-            vx, vy = turn_then_move(vx, vy, w, abs(ang_ball))
 
         # -- Wall braking -----------------------------------------------
         vx, vy = wall_brake(rpos[0], rpos[1], vx, vy)

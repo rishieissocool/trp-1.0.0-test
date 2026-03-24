@@ -19,11 +19,10 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
-    turn_then_move, ball_velocity, update_ball_history, predict_ball,
+    ball_velocity, update_ball_history, predict_ball,
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
-from TeamControl.robot.diamond_nav import DiamondNav
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.robot.constants import (
@@ -197,7 +196,6 @@ def run_duel(is_running, dispatch_q, wm, robot_id, opponent_id,
     last_ball_xy = None
 
     ks = KickState()
-    dnav = DiamondNav()
 
     while is_running.is_set():
         now = time.time()
@@ -313,11 +311,8 @@ def run_duel(is_running, dispatch_q, wm, robot_id, opponent_id,
                                     stop_r=30, ramp=500)
                     w = _face(me, ball)
                 else:
-                    # Track ball from save position via diamond planner
-                    wp = dnav.next_waypoint(frame, is_yellow, robot_id,
-                                            me, save_pt)
-                    nav_target = wp if wp is not None else save_pt
-                    vx, vy = _go_to(me, nav_target, SAVE_SPD, stop_r=50)
+                    # Track ball from save position
+                    vx, vy = _go_to(me, save_pt, SAVE_SPD, stop_r=50)
                     w = _face(me, ball)
 
                 if my_dist < 600:
@@ -406,7 +401,6 @@ def run_duel(is_running, dispatch_q, wm, robot_id, opponent_id,
             if ball_toward_me and bspeed > 150:
                 mode = "defend"
                 ks.reset()
-                dnav.clear()
                 print(f"[duel {tag}] ball incoming — defending!")
                 time.sleep(LOOP_RATE)
                 continue
@@ -415,15 +409,11 @@ def run_duel(is_running, dispatch_q, wm, robot_id, opponent_id,
             if ball is not None and my_dist < 500 and opp_dist > my_dist + 200:
                 mode = "attack"
                 ks.reset()
-                dnav.clear()
                 print(f"[duel {tag}] ball came back — attacking!")
                 time.sleep(LOOP_RATE)
                 continue
 
-            # Use diamond planner to navigate home around obstacles
-            wp = dnav.next_waypoint(frame, is_yellow, robot_id, me, home)
-            nav_target = wp if wp is not None else home
-            vx, vy = _go_to(me, nav_target, APPROACH_SPD)
+            vx, vy = _go_to(me, home, APPROACH_SPD)
             w = _face(me, ball if ball is not None else opp_pos)
 
             if _at(me, home, 200):
@@ -469,12 +459,6 @@ def run_duel(is_running, dispatch_q, wm, robot_id, opponent_id,
         if spd > max_spd:
             vx = vx / spd * max_spd
             vy = vy / spd * max_spd
-
-        # -- Turn-then-move: slow down when facing away from target ------
-        if ball is not None and not ks.bursting:
-            rel_face = world2robot(me, ball)
-            ang_err = abs(math.atan2(rel_face[1], rel_face[0]))
-            vx, vy = turn_then_move(vx, vy, w, ang_err)
 
         # -- Wall braking -----------------------------------------------
         vx, vy = wall_brake(me[0], me[1], vx, vy)

@@ -19,14 +19,13 @@ import math
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
-    clamp, move_toward, wall_brake, rotation_compensate, turn_then_move,
+    clamp, move_toward, wall_brake, rotation_compensate,
 )
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     CRUISE_SPEED, SPRINT_SPEED, MAX_W, TURN_GAIN,
     LOOP_RATE, FRAME_INTERVAL,
 )
-from TeamControl.robot.diamond_nav import DiamondNav
 
 # ── Obstacle avoidance tuning ────────────────────────────────────
 AVOID_DIST = 550          # start avoiding at this range (mm)
@@ -151,7 +150,6 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
     prev_obs_pos = {}
     # Exponential-smoothed output velocities
     sm_vx, sm_vy, sm_w = 0.0, 0.0, 0.0
-    dnav = DiamondNav()
 
     while is_running.is_set():
         # ── Fetch frame (every tick for fast obstacle reaction) ─
@@ -182,22 +180,15 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
         rpos = (float(rp[0]), float(rp[1]), float(rp[2]))
         ball = (float(bp[0]), float(bp[1]))
 
-        # ── Diamond path planning — find next waypoint ────────
-        nav_target = ball
-        wp = dnav.next_waypoint(frame, is_yellow, robot_id, rpos, ball)
-        if wp is not None:
-            nav_target = wp
-
-        # ── Target: the ball (or waypoint) ────────────────────
+        # ── Target: the ball ─────────────────────────────────
         rel_ball = world2robot(rpos, ball)
-        rel_nav = world2robot(rpos, nav_target)
         d_ball = math.hypot(rel_ball[0], rel_ball[1])
 
         # ── Obstacle avoidance (predictive) ──────────────────
         avoid_vx, avoid_vy, closest_obs, prev_obs_pos = _compute_avoidance(
-            rpos, frame, is_yellow, robot_id, rel_nav, prev_obs_pos)
+            rpos, frame, is_yellow, robot_id, rel_ball, prev_obs_pos)
 
-        # ── Base navigation toward waypoint/ball ─────────────
+        # ── Base navigation toward ball ──────────────────────
         # Smoothly reduce speed near obstacles using cosine interpolation
         if closest_obs < AVOID_DIST:
             if closest_obs <= AVOID_CRITICAL:
@@ -209,7 +200,7 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
         else:
             base_speed = CHASE_SPEED
 
-        nav_vx, nav_vy = move_toward(rel_nav, base_speed,
+        nav_vx, nav_vy = move_toward(rel_ball, base_speed,
                                      ramp_dist=NEAR_BALL_DIST,
                                      stop_dist=STOP_DIST,
                                      min_speed=0.06)
@@ -234,10 +225,6 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
             raw_w = 0.0
         else:
             raw_w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-
-        # ── Turn-then-move: slow down when facing away ────
-        raw_vx, raw_vy = turn_then_move(raw_vx, raw_vy, raw_w,
-                                         abs(ang_ball))
 
         # ── Exponential smoothing ─────────────────────────────
         # Blends previous output with new target so the robot
