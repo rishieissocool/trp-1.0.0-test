@@ -99,6 +99,80 @@ def _pick_goal_aim(me):
     return (HALF_LEN, offset)
 
 
+def _get_static_obstacles(frame, is_yellow, robot_id, mate_is_yellow, mate_id):
+    """Get (x, y) positions of all real robots except self and teammate."""
+    obs = []
+    for color in (True, False):
+        for oid in range(16):
+            if color == is_yellow and oid == robot_id:
+                continue
+            if color == mate_is_yellow and oid == mate_id:
+                continue
+            try:
+                other = frame.get_yellow_robots(isYellow=color, robot_id=oid)
+                if isinstance(other, int) or other is None:
+                    continue
+                if hasattr(other, 'confidence') and other.confidence < 0.1:
+                    continue
+                op = other.position
+                ox, oy = float(op[0]), float(op[1])
+                if abs(ox) < 1 and abs(oy) < 1:
+                    continue
+                obs.append((ox, oy))
+            except Exception:
+                continue
+    return obs
+
+
+def _line_blocked(start, end, obstacles, clearance=250):
+    """True if any obstacle is within clearance of the line segment."""
+    sx, sy = start
+    ex, ey = end
+    dx, dy = ex - sx, ey - sy
+    length = math.hypot(dx, dy)
+    if length < 1:
+        return False
+    ux, uy = dx / length, dy / length
+    nx, ny = -uy, ux
+    for ox, oy in obstacles:
+        rx, ry = ox - sx, oy - sy
+        along = rx * ux + ry * uy
+        if along < 0 or along > length:
+            continue
+        perp = abs(rx * nx + ry * ny)
+        if perp < clearance:
+            return True
+    return False
+
+
+def _find_receive_pos(frame, is_yellow, robot_id, mate_is_yellow, mate_id):
+    """Find a receiving position that has a clear line to the goal.
+
+    Tries several candidate positions ahead of the ball and picks
+    the first one where the shot to goal isn't blocked by obstacles.
+    """
+    obs = _get_static_obstacles(frame, is_yellow, robot_id,
+                                 mate_is_yellow, mate_id)
+
+    # Candidate positions: vary x and y to find a clear spot
+    candidates = [
+        (1200,  200), (1200, -200), (1200,    0),
+        (1000,  350), (1000, -350), (1000,    0),
+        ( 800,  400), ( 800, -400), ( 800,  200),
+        (1400,  150), (1400, -150),
+    ]
+
+    goal = (HALF_LEN, 0)
+
+    for cx, cy in candidates:
+        # Check: can this position see the goal?
+        if not _line_blocked((cx, cy), goal, obs, clearance=200):
+            return (cx, cy)
+
+    # Fallback — just go to default
+    return (SUP_RECEIVE_X, SUP_RECEIVE_Y)
+
+
 def _avoid_all_robots(me, frame, is_yellow, robot_id, mate_is_yellow, mate_id):
     """Reactive repulsion from EVERY other robot on the field.
 
@@ -364,47 +438,69 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     ks.reset()
 
             # ----------------------------------------------------------
-            #  SUPPORT — wait at receiving position for pass.
-            #  When ball comes, intercept it. Once ball is nearby
-            #  and stopped, role will switch to carrier automatically
-            #  and kick engine takes over to score.
+            #  SUPPORT
+            #
+            #  Before pass: go to receiving position, wait for pass.
+            #  After pass (I already passed, mate is scoring): GET OUT
+            #  OF THE WAY — retreat far from ball so I don't block.
             # ----------------------------------------------------------
             else:
-                # Compute approach speed of ball toward me
-                dx_to_me = me[0] - ball[0]
-                dy_to_me = me[1] - ball[1]
-                dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
-                approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
+                already_passed = (pass_count >= 1)
 
-                ball_coming = (bspeed > 300 and approach_spd > 150
-                               and dd_to_me < 3000)
+                if already_passed:
+                    # I was the passer — clear out so scorer has room
+                    # Go to a retreat point well away from ball and goal
+                    retreat_x = ball[0] - 1200  # far behind ball
+                    retreat_y = -me[1] * 0.5    # opposite side of field
+                    retreat_x = clamp(retreat_x, -HALF_LEN + 300, HALF_LEN - 600)
+                    retreat_y = clamp(retreat_y, -HALF_WID + 300, HALF_WID - 300)
+                    retreat_pos = (retreat_x, retreat_y)
 
-                if ball_coming:
-                    # Ball passed to me — intercept it
-                    t_a = max(dd_to_me / max(bspeed, 1.0), 0.1)
-                    intercept = predict_ball(
-                        ball, (bvx, bvy), min(t_a, 2.0))
-                    dribble = 1
-                    vx, vy = _go_to(me, intercept, APPROACH_SPD,
-                                    stop_r=30, ramp=500)
-                    w = _face(me, ball)
-
-                else:
-                    # Go to fixed receiving position and wait
-                    receive_pos = (SUP_RECEIVE_X, SUP_RECEIVE_Y)
-                    d_to_pos = _dist(me[:2], receive_pos)
-
-                    if d_to_pos < SUP_STOP_DIST:
-                        # At position — stand still, face ball, dribbler ready
+                    d_to_retreat = _dist(me[:2], retreat_pos)
+                    if d_to_retreat < 150:
                         vx, vy = 0.0, 0.0
                         w = _face(me, ball)
-                        if my_dist < 200:
-                            dribble = 1
                     else:
-                        # Move to receiving position
-                        vx, vy = _go_to(me, receive_pos, APPROACH_SPD,
-                                        stop_r=SUP_STOP_DIST, ramp=400)
+                        vx, vy = _go_to(me, retreat_pos, APPROACH_SPD,
+                                        stop_r=100, ramp=400)
                         w = _face(me, ball)
+
+                else:
+                    # Waiting for pass — go to clear receiving position
+                    dx_to_me = me[0] - ball[0]
+                    dy_to_me = me[1] - ball[1]
+                    dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
+                    approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
+
+                    ball_coming = (bspeed > 300 and approach_spd > 150
+                                   and dd_to_me < 3000)
+
+                    if ball_coming:
+                        # Ball passed to me — intercept it
+                        t_a = max(dd_to_me / max(bspeed, 1.0), 0.1)
+                        intercept = predict_ball(
+                            ball, (bvx, bvy), min(t_a, 2.0))
+                        dribble = 1
+                        vx, vy = _go_to(me, intercept, APPROACH_SPD,
+                                        stop_r=30, ramp=500)
+                        w = _face(me, ball)
+
+                    else:
+                        # Find position with clear shot to goal
+                        receive_pos = _find_receive_pos(
+                            frame, is_yellow, robot_id,
+                            mate_is_yellow, teammate_id)
+                        d_to_pos = _dist(me[:2], receive_pos)
+
+                        if d_to_pos < SUP_STOP_DIST:
+                            vx, vy = 0.0, 0.0
+                            w = _face(me, ball)
+                            if my_dist < 200:
+                                dribble = 1
+                        else:
+                            vx, vy = _go_to(me, receive_pos, APPROACH_SPD,
+                                            stop_r=SUP_STOP_DIST, ramp=400)
+                            w = _face(me, ball)
 
         # ==============================================================
         #  RESET — go home, re-place ball, loop

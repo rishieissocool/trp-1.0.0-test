@@ -21,7 +21,7 @@ from TeamControl.robot.constants import (
 )
 
 # -- Tuning ---------------------------------------------------------------
-CONTACT_DIST    = 150       # mm — ball on dribbler
+CONTACT_DIST    = 160       # mm — ball on dribbler (slightly wider pickup)
 KICK_ALIGN_TOL  = 0.15      # rad (~9 deg) — good enough alignment to kick
 KICK_BURST_T    = 0.50      # s — sustain kick=1 so grSim registers
 FORCE_KICK_TIME = 1.2       # s — max time holding ball before force kick
@@ -154,15 +154,15 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         return r
 
     # ==================================================================
-    #  CLOSE — ball nearby and in front. Drive at it with dribbler.
+    #  CLOSE — ball nearby and in front. Creep toward it slowly.
     # ==================================================================
     if d_ball < KICK_RANGE and rel_ball[0] > -10:
         r.dribble = 1
-        # Slow approach — don't overshoot
-        r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD * 0.6,
-                                  ramp_dist=100, stop_dist=0)
-        # Blend: face ball mostly, start turning toward aim
-        blend = clamp(1.0 - d_ball / KICK_RANGE, 0.0, 0.5)
+        # Very slow — creep in so we don't push ball away
+        r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD * 0.35,
+                                  ramp_dist=80, stop_dist=0)
+        # Face ball, gentle aim blend
+        blend = clamp(1.0 - d_ball / KICK_RANGE, 0.0, 0.4)
         w_ball = ang_ball * TURN_GAIN
         w_aim = ang_aim * TURN_GAIN
         r.w = clamp(w_ball * (1.0 - blend) + w_aim * blend,
@@ -175,25 +175,25 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         return r
 
     # ==================================================================
-    #  FAR — drive straight at ball. No arcing, just go get it.
-    #  Turn to face ball first, then drive.
+    #  FAR — drive at ball. Slow down as we get closer.
     # ==================================================================
     ks.near_ball_since = 0.0
     r.dribble = 1 if d_ball < BALL_NEAR else 0
 
-    # Face the ball
     r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
 
-    # Speed depends on distance
+    # Ramp speed: fast when far, slow when approaching
     if d_ball > BALL_NEAR:
-        speed = CRUISE_SPEED
+        speed = CRUISE_SPEED * 0.8
+    elif d_ball > KICK_RANGE * 2:
+        speed = DRIBBLE_SPD * 0.7
     else:
-        speed = DRIBBLE_SPD
+        speed = DRIBBLE_SPD * 0.4
 
     r.vx, r.vy = move_toward(rel_ball, speed,
                               ramp_dist=400, stop_dist=10)
 
-    # If facing far from ball, slow down to turn first
+    # If not facing ball, slow down to turn first
     if abs(ang_ball) > 0.4:
         scale = max(1.0 - abs(ang_ball) / 1.0, 0.1)
         r.vx *= scale
