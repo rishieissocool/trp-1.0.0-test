@@ -22,7 +22,7 @@ The engine handles:
 
 import math
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.ball_nav import clamp, move_toward, compute_arc_nav
+from TeamControl.robot.ball_nav import clamp, move_toward, compute_arc_nav, turn_then_move
 from TeamControl.robot.constants import (
     KICK_RANGE, BALL_NEAR, BEHIND_DIST, AVOID_RADIUS,
     CRUISE_SPEED, CHARGE_SPEED, DRIBBLE_SPEED,
@@ -233,6 +233,8 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         r.vx, r.vy = move_toward(rel_nav, APPROACH_SPD,
                                   ramp_dist=350, stop_dist=10)
         r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+        # Slow down translation when facing far from ball
+        r.vx, r.vy = turn_then_move(r.vx, r.vy, r.w, abs(ang_ball))
 
     r.committed_side = ks.committed_side
     return r

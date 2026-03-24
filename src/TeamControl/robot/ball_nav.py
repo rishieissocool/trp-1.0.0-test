@@ -189,6 +189,30 @@ def wall_brake(rx, ry, vx, vy,
     return vx, vy
 
 
+def turn_then_move(vx, vy, w, ang_error, threshold=0.35):
+    """Scale down linear velocity when angular error is large.
+
+    When the robot needs to turn a lot, slow down or stop so it can
+    rotate in place first. Once aligned, allow full translation speed.
+
+    Args:
+        vx, vy:     commanded velocity
+        w:          commanded angular velocity
+        ang_error:  absolute angular error to target (radians)
+        threshold:  below this angle, full speed; above 2x this, nearly stopped
+
+    Returns:
+        (vx, vy) with reduced magnitude when turning hard.
+    """
+    ang = abs(ang_error)
+    if ang < threshold:
+        return vx, vy
+    # Linear ramp: at threshold -> 1.0, at 2*threshold -> 0.1
+    t = clamp((ang - threshold) / max(threshold, 0.01), 0.0, 1.0)
+    factor = 1.0 - 0.9 * t   # 1.0 -> 0.1
+    return vx * factor, vy * factor
+
+
 def rotation_compensate(vx, vy, w, dt=LOOP_RATE):
     """Pre-rotate velocity so the world-frame path stays on target
     despite simultaneous rotation.

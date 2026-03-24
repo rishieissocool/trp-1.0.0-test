@@ -19,7 +19,7 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
-    ball_velocity, update_ball_history, predict_ball,
+    turn_then_move, ball_velocity, update_ball_history, predict_ball,
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
@@ -469,6 +469,12 @@ def run_duel(is_running, dispatch_q, wm, robot_id, opponent_id,
         if spd > max_spd:
             vx = vx / spd * max_spd
             vy = vy / spd * max_spd
+
+        # -- Turn-then-move: slow down when facing away from target ------
+        if ball is not None and not ks.bursting:
+            rel_face = world2robot(me, ball)
+            ang_err = abs(math.atan2(rel_face[1], rel_face[0]))
+            vx, vy = turn_then_move(vx, vy, w, ang_err)
 
         # -- Wall braking -----------------------------------------------
         vx, vy = wall_brake(me[0], me[1], vx, vy)

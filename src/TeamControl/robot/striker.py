@@ -18,7 +18,7 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
-    ball_velocity, update_ball_history, predict_ball,
+    turn_then_move, ball_velocity, update_ball_history, predict_ball,
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
@@ -277,6 +277,10 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                 w = 0.0
             else:
                 w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+
+        # -- Turn-then-move: slow down when facing away from target ------
+        if not ks.bursting:
+            vx, vy = turn_then_move(vx, vy, w, abs(ang_ball))
 
         # -- Wall braking -----------------------------------------------
         vx, vy = wall_brake(rpos[0], rpos[1], vx, vy)

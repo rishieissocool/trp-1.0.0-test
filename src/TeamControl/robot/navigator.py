@@ -19,7 +19,7 @@ import math
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
-    clamp, move_toward, wall_brake, rotation_compensate,
+    clamp, move_toward, wall_brake, rotation_compensate, turn_then_move,
 )
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
@@ -234,6 +234,10 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
             raw_w = 0.0
         else:
             raw_w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
+
+        # ── Turn-then-move: slow down when facing away ────
+        raw_vx, raw_vy = turn_then_move(raw_vx, raw_vy, raw_w,
+                                         abs(ang_ball))
 
         # ── Exponential smoothing ─────────────────────────────
         # Blends previous output with new target so the robot

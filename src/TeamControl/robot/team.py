@@ -23,7 +23,7 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.ball_nav import compute_arc_nav, predict_ball as _predict_ball
+from TeamControl.robot.ball_nav import compute_arc_nav, predict_ball as _predict_ball, turn_then_move
 from TeamControl.robot.diamond_nav import DiamondNav
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
@@ -708,6 +708,9 @@ def _cmd(rid, rpos, target, face, speed, kick, dribble, yellow,
 
     ang = math.atan2(rel_f[1], rel_f[0])
     w = 0.0 if abs(ang) < 0.04 else _cl(ang * TURN_GAIN, -MAX_W, MAX_W)
+
+    # Turn-then-move: slow down translation when facing far from target
+    vx, vy = turn_then_move(vx, vy, w, abs(ang))
 
     return RobotCommand(robot_id=rid, vx=vx, vy=vy, w=w,
                         kick=kick, dribble=dribble, isYellow=yellow)
