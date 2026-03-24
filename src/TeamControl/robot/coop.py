@@ -318,15 +318,15 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
             d_behind = _dist(me, behind_pt)
 
-            # Drive toward behind point
+            # Drive toward behind point — slow and deliberate
             rel_nav = world2robot(me, behind_pt)
-            vx, vy = move_toward(rel_nav, APPROACH_SPD, ramp_dist=400, stop_dist=30)
+            vx, vy = move_toward(rel_nav, APPROACH_SPD * 0.35, ramp_dist=300, stop_dist=30)
             w = _face(me, ball)
             dribble = 0
 
-            # Strong ball repulsion — forces Blue to arc around the ball
+            # Gentle ball repulsion — nudges Blue around the ball
             if my_dist < REPOSITION_SWING_R:
-                push = APPROACH_SPD * 1.6 * (1.0 - my_dist / REPOSITION_SWING_R)
+                push = APPROACH_SPD * 0.5 * (1.0 - my_dist / REPOSITION_SWING_R)
                 away_x = (me[0] - ball[0]) / max(my_dist, 1.0)
                 away_y = (me[1] - ball[1]) / max(my_dist, 1.0)
                 # Bias toward chosen side so the arc is consistent
