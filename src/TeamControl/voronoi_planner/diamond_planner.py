@@ -17,7 +17,7 @@ import numpy as np
 from TeamControl.voronoi_planner.obstacle import Obstacle
 
 # --- Tunable constants ---------------------------------------------------
-CLEARANCE    = 100    # mm — min distance to maintain from obstacles
+CLEARANCE    = 150    # mm — min distance to maintain from obstacles
 ROBOT_RADIUS = 90     # mm — robot body radius (180 mm diameter)
 NODE_COUNT   = 8      # virtual nodes per obstacle ring
 NODE_MARGIN  = -50    # mm — offset nodes away from clearance edge

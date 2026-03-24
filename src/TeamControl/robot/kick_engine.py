@@ -31,7 +31,7 @@ from TeamControl.robot.constants import (
 )
 
 # -- Tuning (shared across all users) ----------------------------------
-CONTACT_DIST    = 120       # mm — ball touching dribbler
+CONTACT_DIST    = 130       # mm — ball touching dribbler (slightly closer before kick)
 KICK_ALIGN_TOL  = 0.10      # rad (~6 deg) — tight alignment for precise kicks
 KICK_BURST_T    = 0.55      # s — sustain kick=1 longer so grSim reliably registers
 FORCE_KICK_TIME = 2.5       # s — be patient, wait for proper alignment

@@ -94,7 +94,7 @@ DISTRIBUTE_SPEED  = 0.40 * MAX_SPEED   # dribble to pass
 #  DISTANCES (mm)
 # ═════════════════════════════════════════════════════════════════
 
-KICK_RANGE        = 160      # trigger kick distance — tighter for reliable contact
+KICK_RANGE        = 175      # trigger kick distance — get closer before engaging
 KICK_DIST         = 160      # alias used by goalie
 BALL_NEAR         = 400      # "close to ball" threshold
 BEHIND_DIST       = 280      # lineup distance behind ball — further back for clean approach
