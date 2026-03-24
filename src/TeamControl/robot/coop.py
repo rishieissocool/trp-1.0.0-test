@@ -292,6 +292,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     # Pass tracking — must complete at least 1 pass before shooting
     pass_count = 0
     prev_role = my_role
+    kicked = False          # True after this robot has kicked — retreat immediately
 
     while is_running.is_set():
         now = time.time()
@@ -346,6 +347,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 reset_time = now
                 ks.reset()
                 pass_count = 0
+                kicked = False
 
         # -- Cycle timeout → reset -------------------------------------
         if mode == "play" and (now - cycle_start) > CYCLE_TIMEOUT:
@@ -354,10 +356,14 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             reset_time = now
             ks.reset()
             pass_count = 0
+            kicked = False
 
         # -- Role determination (play mode only) ------------------------
         if mode == "play" and ball is not None:
-            if ks.bursting:
+            if kicked:
+                # Already kicked — stay as support, retreat
+                my_role = "support"
+            elif ks.bursting:
                 pass  # don't switch during kick
             elif my_dist < mate_dist - CARRIER_MARGIN:
                 if my_role != "carrier":
@@ -436,6 +442,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                         print(f"[coop {tag}] PASS to mate!")
                 if kr.burst_done:
                     ks.reset()
+                    if not can_shoot:
+                        # Passed — immediately retreat, let mate score
+                        kicked = True
+                        my_role = "support"
+                        print(f"[coop {tag}] kicked, retreating")
 
             # ----------------------------------------------------------
             #  SUPPORT
@@ -445,13 +456,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             #  OF THE WAY — retreat far from ball so I don't block.
             # ----------------------------------------------------------
             else:
-                already_passed = (pass_count >= 1)
-
-                if already_passed:
-                    # I was the passer — clear out so scorer has room
-                    # Go to a retreat point well away from ball and goal
-                    retreat_x = ball[0] - 1200  # far behind ball
-                    retreat_y = -me[1] * 0.5    # opposite side of field
+                if kicked:
+                    # I already kicked — get out of the way fast
+                    retreat_x = ball[0] - 1500
+                    retreat_y = -me[1] * 0.6
                     retreat_x = clamp(retreat_x, -HALF_LEN + 300, HALF_LEN - 600)
                     retreat_y = clamp(retreat_y, -HALF_WID + 300, HALF_WID - 300)
                     retreat_pos = (retreat_x, retreat_y)
@@ -461,9 +469,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                         vx, vy = 0.0, 0.0
                         w = _face(me, ball)
                     else:
-                        vx, vy = _go_to(me, retreat_pos, APPROACH_SPD,
+                        vx, vy = _go_to(me, retreat_pos, CRUISE_SPEED,
                                         stop_r=100, ramp=400)
-                        w = _face(me, ball)
+                        w = _face(me, retreat_pos)
 
                 else:
                     # Waiting for pass — go to clear receiving position
@@ -524,6 +532,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 my_role = "carrier" if is_yellow else "support"
                 prev_role = my_role
                 pass_count = 0
+                kicked = False
                 ks.reset()
                 ball_history.clear()
                 print(f"[coop {tag}] next cycle")
