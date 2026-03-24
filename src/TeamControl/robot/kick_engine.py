@@ -211,44 +211,49 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
         return r
 
     # ==================================================================
-    #  P3: Arc approach — get behind ball relative to aim, drive in
+    #  P3: Get behind ball, then drive at it.
     #
-    #  Once lined up behind ball, switch to dribble speed and charge
-    #  straight at the ball with aim-aligned rotation.
+    #  Simple: compute "behind point" = opposite side of ball from aim.
+    #  Go to that point. Once there, drive at ball.
+    #  No complex arcs — just go to the behind point.
     # ==================================================================
     ks.near_ball_since = 0.0
 
-    nav, ks.committed_side, is_behind = compute_arc_nav(
-        robot_xy=(me[0], me[1]),
-        ball=ball, aim=aim,
-        behind_dist=BEHIND_DIST,
-        avoid_radius=AVOID_RADIUS,
-        committed_side=ks.committed_side,
-    )
+    # Unit vector ball → aim
+    ba_dx = aim[0] - ball[0]
+    ba_dy = aim[1] - ball[1]
+    ba_d = max(math.hypot(ba_dx, ba_dy), 1.0)
+    aim_ux, aim_uy = ba_dx / ba_d, ba_dy / ba_d
 
-    rel_nav = world2robot(me, nav)
-    d_nav = math.hypot(rel_nav[0], rel_nav[1])
+    # Behind point = ball - aim_direction * BEHIND_DIST
+    behind = (ball[0] - aim_ux * BEHIND_DIST,
+              ball[1] - aim_uy * BEHIND_DIST)
 
-    # Check if we're truly behind: ball must be in front of us AND
-    # we must be roughly facing the aim direction
-    facing_aim = abs(ang_aim) < 0.4  # ~23 deg tolerance
-    ball_in_front = rel_ball[0] > 0
+    # How far am I from the behind point?
+    rel_behind = world2robot(me, behind)
+    d_behind = math.hypot(rel_behind[0], rel_behind[1])
 
-    if is_behind and d_nav < 300 and d_ball < BALL_NEAR and facing_aim and ball_in_front:
-        # Properly behind and aligned — drive straight at ball
+    # Am I at the behind point and facing the ball?
+    at_behind = d_behind < 200
+    facing_ball = abs(ang_ball) < 0.5
+
+    if at_behind and facing_ball:
+        # At the behind point, facing ball — drive straight in
         r.dribble = 1
         r.vx, r.vy = move_toward(rel_ball, DRIBBLE_SPD,
-                                  ramp_dist=200, stop_dist=0)
+                                  ramp_dist=250, stop_dist=0)
         r.w = clamp(ang_aim * TURN_GAIN, -MAX_W, MAX_W)
     else:
-        # Not behind yet — keep arcing, go slow
-        r.vx, r.vy = move_toward(rel_nav, DRIBBLE_SPD * 1.0,
-                                  ramp_dist=300, stop_dist=10)
-        # Face the ball while getting into position
-        r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-        # Almost stop when facing far from ball — turn first, then move
-        r.vx, r.vy = turn_then_move(r.vx, r.vy, r.w, abs(ang_ball),
-                                     threshold=0.25)
+        # Go to behind point
+        ang_behind = math.atan2(rel_behind[1], rel_behind[0])
+        r.w = clamp(ang_behind * TURN_GAIN, -MAX_W, MAX_W)
+        r.vx, r.vy = move_toward(rel_behind, CRUISE_SPEED * 0.7,
+                                  ramp_dist=300, stop_dist=30)
+        # Slow down if not facing the target
+        if abs(ang_behind) > 0.5:
+            scale = max(1.0 - abs(ang_behind) / 1.5, 0.1)
+            r.vx *= scale
+            r.vy *= scale
 
     r.committed_side = ks.committed_side
     return r
