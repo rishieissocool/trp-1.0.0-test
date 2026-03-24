@@ -1,8 +1,9 @@
 """
-Cooperative passing drill — two robots kick the ball back and forth.
+Cooperative pass-and-shoot drill.
 
-Yellow in left half, blue in right half. Uses the shared kick_engine
-for approach, alignment, and sustained kick bursts.
+Yellow passes to blue, then blue scores on the right-side goal.
+Uses the shared kick_engine for approach, alignment, and sustained
+kick bursts.
 
 Field is 4500 x 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -249,7 +250,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # ==============================================================
         #  ACTIVE — kick engine handles everything
-        #  aim = mate_pos (pass to teammate)
+        #  Yellow aims at mate (pass), Blue aims at right goal (shoot)
         # ==============================================================
         elif mode == "active":
             if ball is None:
@@ -264,6 +265,12 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 print(f"[coop {tag}] ball went to mate — retreating")
                 time.sleep(LOOP_RATE)
                 continue
+
+            # Yellow passes to blue; blue shoots at the right goal
+            if is_yellow:
+                aim = mate_pos
+            else:
+                aim = (HALF_LEN, 0)
 
             # Intercept fast incoming ball
             rel_ball = world2robot(me, ball)
@@ -283,29 +290,31 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                     stop_r=30, ramp=500)
                     w = _face(me, ball)
                 else:
-                    # Close enough or not coming at me — let kick engine handle
-                    kr = kick_tick(ks, me, ball, mate_pos, now, rel_ball, d_ball)
+                    kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
                     vx, vy, w = kr.vx, kr.vy, kr.w
                     kick, dribble = kr.kick, kr.dribble
                     if kr.kick_started:
                         pass_count += 1
-                        print(f"[coop {tag}] KICKING pass #{pass_count}!")
+                        action = "PASSING" if is_yellow else "SHOOTING"
+                        print(f"[coop {tag}] {action} #{pass_count}!")
                     if kr.burst_done:
                         mode = "retreat"
                         ks.reset()
-                        print(f"[coop {tag}] kick done — retreating")
+                        action = "pass" if is_yellow else "shot"
+                        print(f"[coop {tag}] {action} done — retreating")
             else:
-                # Ball slow/stationary — kick engine does approach + align + burst
-                kr = kick_tick(ks, me, ball, mate_pos, now, rel_ball, d_ball)
+                kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
                 vx, vy, w = kr.vx, kr.vy, kr.w
                 kick, dribble = kr.kick, kr.dribble
                 if kr.kick_started:
                     pass_count += 1
-                    print(f"[coop {tag}] KICKING pass #{pass_count}!")
+                    action = "PASSING" if is_yellow else "SHOOTING"
+                    print(f"[coop {tag}] {action} #{pass_count}!")
                 if kr.burst_done:
                     mode = "retreat"
                     ks.reset()
-                    print(f"[coop {tag}] kick done — retreating")
+                    action = "pass" if is_yellow else "shot"
+                    print(f"[coop {tag}] {action} done — retreating")
 
         # ==============================================================
         #  RETREAT — go home, but intercept if ball incoming
