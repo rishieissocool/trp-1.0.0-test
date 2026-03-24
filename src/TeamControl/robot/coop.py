@@ -109,7 +109,8 @@ def _at(me, target, radius):
 #    home        — predict incoming ball, move to intercept
 #    receive     — Blue only: intercept + absorb pass, wait for ball to stop
 #    reposition  — Blue only: arc wide around ball to get behind it
-#    active      — kick_engine: approach + align + burst (Yellow→mate, Blue→goal)
+#    prealign    — Blue only: full stop, rotate to face goal precisely
+#    active      — kick_engine: drive forward + burst (Yellow→mate, Blue→goal)
 #    retreat     — go back to home
 # =====================================================================
 
@@ -335,11 +336,34 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 vx += (away_x * 0.55 + perp_x * 0.45) * push
                 vy += (away_y * 0.55 + perp_y * 0.45) * push
 
-            # In position — hand off to kick engine
+            # In position — stop and align before shooting
             if d_behind < 220:
+                mode = "prealign"
+                ks.reset()
+                print(f"[coop blue] in position — aligning to goal")
+
+        # ==============================================================
+        #  PREALIGN (Blue only) — full stop, rotate precisely to goal
+        # ==============================================================
+        elif mode == "prealign":
+            if ball is None:
+                mode = "home"
+                time.sleep(LOOP_RATE)
+                continue
+
+            aim = (HALF_LEN, 0)
+            rel_aim = world2robot(me, aim)
+            ang_to_aim = math.atan2(rel_aim[1], rel_aim[0])
+
+            # Completely stopped — only rotate
+            vx, vy = 0.0, 0.0
+            w = clamp(ang_to_aim * TURN_GAIN * 0.4, -MAX_W, MAX_W)
+            kick, dribble = 0, 0
+
+            if abs(ang_to_aim) < 0.05:   # ~3 deg — precise enough
                 mode = "active"
                 ks.reset()
-                print(f"[coop blue] in position — shooting!")
+                print(f"[coop blue] aligned — shooting!")
 
         # ==============================================================
         #  ACTIVE — kick engine handles everything
@@ -364,20 +388,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 aim = mate_pos
             else:
                 aim = (HALF_LEN, 0)
-
-            # Blue: rotate in place to face goal before approaching
-            if not is_yellow and not ks.bursting:
-                rel_aim = world2robot(me, aim)
-                ang_to_aim = math.atan2(rel_aim[1], rel_aim[0])
-                if abs(ang_to_aim) > 0.06:   # ~3.5 deg
-                    w = clamp(ang_to_aim * TURN_GAIN * 0.5, -MAX_W, MAX_W)
-                    vx, vy, kick, dribble = 0.0, 0.0, 0, 0
-                    cmd = RobotCommand(robot_id=robot_id, vx=vx, vy=vy, w=w,
-                                       kick=kick, dribble=dribble,
-                                       isYellow=is_yellow)
-                    dispatch_q.put((cmd, 0.15))
-                    time.sleep(LOOP_RATE)
-                    continue
 
             # Intercept fast incoming ball
             rel_ball = world2robot(me, ball)
@@ -453,7 +463,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # -- Obstacle avoidance (all modes except kicking burst) --------
         if not ks.bursting:
-            if mode in ("home", "receive", "active"):
+            if mode in ("home", "receive", "prealign", "active"):
                 target_for_avoid = ball if ball is not None else mate_pos
             else:
                 target_for_avoid = home
