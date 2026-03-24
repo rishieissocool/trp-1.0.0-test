@@ -208,5 +208,12 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
                                   ramp_dist=400, stop_dist=10)
         r.w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
 
+        # Push away from ball while arcing to avoid knocking it
+        if d_ball < AVOID_RADIUS:
+            push_strength = APPROACH_SPD * 0.8 * (1.0 - d_ball / AVOID_RADIUS)
+            if d_ball > 1.0:
+                r.vx += (-rel_ball[0] / d_ball) * push_strength
+                r.vy += (-rel_ball[1] / d_ball) * push_strength
+
     r.committed_side = ks.committed_side
     return r
