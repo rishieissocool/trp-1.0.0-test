@@ -21,7 +21,7 @@ Usage:
 import math
 
 # Clearance from obstacle centre (obstacle radius + this margin)
-AVOID_MARGIN = 220   # mm — generous margin on top of obstacle radius
+AVOID_MARGIN = 300   # mm — very wide margin to prevent any contact
 
 
 class DiamondNav:
@@ -164,3 +164,10 @@ def _get_all_obstacles(frame, is_yellow, robot_id, exclude_ids):
             except Exception:
                 continue
     return obstacles
+
+
+def get_all_obstacles(frame, is_yellow, robot_id, exclude_ids=None):
+    """Public version — returns list of (cx, cy, radius) for all robots
+    on field except self and optionally excluded IDs."""
+    return _get_all_obstacles(frame, is_yellow, robot_id,
+                              exclude_ids or set())

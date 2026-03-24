@@ -21,7 +21,7 @@ from TeamControl.robot.ball_nav import (
     turn_then_move, ball_velocity, update_ball_history, predict_ball,
 )
 from TeamControl.robot.kick_engine import KickState, kick_tick
-from TeamControl.robot.diamond_nav import DiamondNav
+from TeamControl.robot.diamond_nav import DiamondNav, get_all_obstacles
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.robot.constants import (
@@ -161,6 +161,60 @@ def _pick_goal_aim(me):
     """Aim inside the goal mouth toward the far post."""
     offset = clamp(-me[1] * 0.3, -GOAL_HW * 0.7, GOAL_HW * 0.7)
     return (HALF_LEN, offset)
+
+
+# -- Obstacle safety constants -----------------------------------------
+OBS_EMERGENCY_DIST  = 350   # mm — emergency repulsion kicks in here
+OBS_EMERGENCY_STR   = 6.0   # strong push — last-resort collision prevention
+OBS_SLOWDOWN_DIST   = 600   # mm — start slowing down at this distance
+OBS_SLOWDOWN_MIN    = 0.15  # minimum speed factor when very close
+
+
+def _emergency_avoidance(me, obstacles_list):
+    """Reactive repulsion from ALL nearby obstacles (robots).
+
+    This is a safety net — the path planner should avoid obstacles, but
+    if the robot overshoots or drifts too close, this pushes it away.
+
+    Args:
+        me:             (x, y, orientation) robot pose
+        obstacles_list: list of (cx, cy, radius) from get_all_obstacles
+
+    Returns:
+        (avoid_vx, avoid_vy) repulsion velocity in robot frame.
+    """
+    total_vx, total_vy = 0.0, 0.0
+    for ox, oy, orad in obstacles_list:
+        rel = world2robot(me, (ox, oy))
+        d = math.hypot(rel[0], rel[1])
+        safe_r = orad + OBS_EMERGENCY_DIST
+        if d >= safe_r or d < 1:
+            continue
+        # Strength ramps up as we get closer
+        t = (safe_r - d) / safe_r  # 0 at edge, 1 at centre
+        strength = OBS_EMERGENCY_STR * t * t  # quadratic — much stronger close up
+        inv_d = 1.0 / d
+        total_vx -= rel[0] * inv_d * strength
+        total_vy -= rel[1] * inv_d * strength
+    return total_vx, total_vy
+
+
+def _obstacle_speed_factor(me, obstacles_list):
+    """Compute a speed multiplier [OBS_SLOWDOWN_MIN, 1.0] based on
+    proximity to the closest obstacle.  Robots slow down when near
+    obstacles so they don't overshoot waypoints into them."""
+    min_gap = float('inf')
+    for ox, oy, orad in obstacles_list:
+        d = math.hypot(me[0] - ox, me[1] - oy)
+        gap = d - orad  # distance from obstacle edge
+        if gap < min_gap:
+            min_gap = gap
+    if min_gap >= OBS_SLOWDOWN_DIST:
+        return 1.0
+    if min_gap <= 0:
+        return OBS_SLOWDOWN_MIN
+    t = min_gap / OBS_SLOWDOWN_DIST  # 0..1
+    return OBS_SLOWDOWN_MIN + (1.0 - OBS_SLOWDOWN_MIN) * t
 
 
 def _teammate_avoidance(me, frame, mate_is_yellow, mate_id):
@@ -403,8 +457,11 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
                 if can_shoot:
                     aim = goal_aim
+                elif pass_count < 1:
+                    # Must pass first — aim toward teammate, not goal
+                    aim = (mate_pos[0], mate_pos[1] * 0.5)
                 else:
-                    # Aim straight forward — always +x direction
+                    # Already passed, but can't shoot yet — aim forward
                     aim = (ball[0] + 2000, ball[1] * 0.1)
 
                 # -- Get to ball safely via diamond nav ---------------
@@ -521,12 +578,28 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 dnav.clear()
                 print(f"[coop {tag}] next cycle")
 
-        # -- Teammate avoidance (static obstacles handled by path planner)
+        # -- Collect all obstacles for safety systems -------------------
+        all_obs = get_all_obstacles(
+            frame, is_yellow, robot_id,
+            {(mate_is_yellow, teammate_id)})
+
+        # -- Teammate avoidance -----------------------------------------
         if not ks.bursting:
             avoid_vx, avoid_vy = _teammate_avoidance(
                 me, frame, mate_is_yellow, teammate_id)
             vx += avoid_vx
             vy += avoid_vy
+
+        # -- Emergency obstacle avoidance (safety net for ALL robots) ---
+        if not ks.bursting:
+            em_vx, em_vy = _emergency_avoidance(me, all_obs)
+            vx += em_vx
+            vy += em_vy
+
+        # -- Proximity-based speed reduction (prevent overshooting) -----
+        obs_factor = _obstacle_speed_factor(me, all_obs)
+        vx *= obs_factor
+        vy *= obs_factor
 
         # -- Speed cap --------------------------------------------------
         spd = math.hypot(vx, vy)
