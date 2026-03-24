@@ -1,9 +1,8 @@
 """
 Cooperative pass-and-shoot drill.
 
-Yellow passes to blue, then blue scores on the right-side goal.
-Uses the shared kick_engine for approach, alignment, and sustained
-kick bursts.
+Yellow (left) passes to Blue (right), then Blue shoots at the right-side
+goal (x = +2250).  After the shot the drill resets automatically.
 
 Field is 4500 x 2230 mm  (HALF_LEN = 2250, HALF_WID = 1115).
 """
@@ -52,6 +51,7 @@ BALL_START      = (-1200, 0)
 CLAIM_DIST      = 2200      # mm — ball within this = I go for it
 APPROACH_SPD    = CRUISE_SPEED
 SETUP_PAUSE     = 2.0
+GOAL_TARGET     = (HALF_LEN, 0)   # centre of the right-side goal
 
 # Exported for UI overlay
 ATK_START       = HOME_YELLOW
@@ -194,6 +194,18 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         kick, dribble = 0, 0
 
         # ==============================================================
+        #  RESET CHECK — ball past goal line means drill is over
+        #  (Yellow detects Blue's shot crossed the goal)
+        # ==============================================================
+        if is_yellow and mode in ("home", "retreat") and ball is not None:
+            if ball[0] > HALF_LEN:
+                mode = "setup"
+                ks.reset()
+                setup_time = now
+                ball_placed = False
+                print(f"[coop {tag}] ball in goal — resetting drill")
+
+        # ==============================================================
         #  SETUP
         # ==============================================================
         if mode == "setup":
@@ -250,7 +262,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # ==============================================================
         #  ACTIVE — kick engine handles everything
-        #  Yellow aims at mate (pass), Blue aims at right goal (shoot)
+        #  Yellow aims at mate (pass), Blue aims at goal (shoot)
         # ==============================================================
         elif mode == "active":
             if ball is None:
@@ -266,11 +278,8 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 time.sleep(LOOP_RATE)
                 continue
 
-            # Yellow passes to blue; blue shoots at the right goal
-            if is_yellow:
-                aim = mate_pos
-            else:
-                aim = (HALF_LEN, 0)
+            # Yellow passes to mate, Blue shoots at goal
+            aim = mate_pos if is_yellow else GOAL_TARGET
 
             # Intercept fast incoming ball
             rel_ball = world2robot(me, ball)
@@ -295,26 +304,40 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     kick, dribble = kr.kick, kr.dribble
                     if kr.kick_started:
                         pass_count += 1
-                        action = "PASSING" if is_yellow else "SHOOTING"
-                        print(f"[coop {tag}] {action} #{pass_count}!")
+                        label = "PASSING" if is_yellow else "SHOOTING"
+                        print(f"[coop {tag}] {label} #{pass_count}!")
                     if kr.burst_done:
-                        mode = "retreat"
-                        ks.reset()
-                        action = "pass" if is_yellow else "shot"
-                        print(f"[coop {tag}] {action} done — retreating")
+                        if is_yellow:
+                            mode = "retreat"
+                            ks.reset()
+                            print(f"[coop {tag}] pass done — retreating")
+                        else:
+                            # Blue shot — reset the drill
+                            mode = "setup"
+                            ks.reset()
+                            setup_time = now
+                            ball_placed = False
+                            print(f"[coop {tag}] GOAL! resetting drill")
             else:
                 kr = kick_tick(ks, me, ball, aim, now, rel_ball, d_ball)
                 vx, vy, w = kr.vx, kr.vy, kr.w
                 kick, dribble = kr.kick, kr.dribble
                 if kr.kick_started:
                     pass_count += 1
-                    action = "PASSING" if is_yellow else "SHOOTING"
-                    print(f"[coop {tag}] {action} #{pass_count}!")
+                    label = "PASSING" if is_yellow else "SHOOTING"
+                    print(f"[coop {tag}] {label} #{pass_count}!")
                 if kr.burst_done:
-                    mode = "retreat"
-                    ks.reset()
-                    action = "pass" if is_yellow else "shot"
-                    print(f"[coop {tag}] {action} done — retreating")
+                    if is_yellow:
+                        mode = "retreat"
+                        ks.reset()
+                        print(f"[coop {tag}] pass done — retreating")
+                    else:
+                        # Blue shot — reset the drill
+                        mode = "setup"
+                        ks.reset()
+                        setup_time = now
+                        ball_placed = False
+                        print(f"[coop {tag}] GOAL! resetting drill")
 
         # ==============================================================
         #  RETREAT — go home, but intercept if ball incoming
