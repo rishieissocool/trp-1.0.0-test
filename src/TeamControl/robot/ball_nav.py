@@ -275,7 +275,13 @@ def compute_arc_nav(
     d_ball = math.hypot(rbx, rby)
 
     # ── Do we need to arc? ──────────────────────────────────
-    need_arc = (along > -behind_dist * 0.2) and (d_ball < avoid_radius * 2.5)
+    # Robot must be well behind the ball AND laterally aligned to skip arc.
+    # "behind" means along < -behind_dist * 0.7 (at least 70% behind)
+    # AND not too far off to the side (perp < behind_dist * 0.5)
+    well_behind = (along < -behind_dist * 0.7) and (abs(perp) < behind_dist * 0.5)
+
+    need_arc = not well_behind
+    # Also force arc if too close to ball from wrong angle
     if d_ball < avoid_radius * 0.8 and along > -behind_dist * 0.5:
         need_arc = True
 
