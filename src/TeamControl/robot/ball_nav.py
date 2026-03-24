@@ -189,30 +189,6 @@ def wall_brake(rx, ry, vx, vy,
     return vx, vy
 
 
-def turn_then_move(vx, vy, w, ang_error, threshold=0.35):
-    """Scale down linear velocity when angular error is large.
-
-    When the robot needs to turn a lot, slow down or stop so it can
-    rotate in place first. Once aligned, allow full translation speed.
-
-    Args:
-        vx, vy:     commanded velocity
-        w:          commanded angular velocity
-        ang_error:  absolute angular error to target (radians)
-        threshold:  below this angle, full speed; above 2x this, nearly stopped
-
-    Returns:
-        (vx, vy) with reduced magnitude when turning hard.
-    """
-    ang = abs(ang_error)
-    if ang < threshold:
-        return vx, vy
-    # Linear ramp: at threshold -> 1.0, at 2*threshold -> 0.1
-    t = clamp((ang - threshold) / max(threshold, 0.01), 0.0, 1.0)
-    factor = 1.0 - 0.9 * t   # 1.0 -> 0.1
-    return vx * factor, vy * factor
-
-
 def rotation_compensate(vx, vy, w, dt=LOOP_RATE):
     """Pre-rotate velocity so the world-frame path stays on target
     despite simultaneous rotation.
@@ -275,14 +251,8 @@ def compute_arc_nav(
     d_ball = math.hypot(rbx, rby)
 
     # ── Do we need to arc? ──────────────────────────────────
-    # Robot must be well behind the ball AND laterally aligned to skip arc.
-    # "behind" means along < -behind_dist * 0.7 (at least 70% behind)
-    # AND not too far off to the side (perp < behind_dist * 0.5)
-    well_behind = (along < -behind_dist * 0.7) and (abs(perp) < behind_dist * 0.5)
-
-    need_arc = not well_behind
-    # Also force arc if too close to ball from wrong angle
-    if d_ball < avoid_radius * 0.8 and along > -behind_dist * 0.5:
+    need_arc = (along > -behind_dist * 0.15) and (d_ball < avoid_radius * 3.0)
+    if d_ball < avoid_radius * 0.9 and along > -behind_dist * 0.5:
         need_arc = True
 
     if not need_arc:
@@ -312,7 +282,7 @@ def compute_arc_nav(
         0.0, 1.0,
     )
 
-    arc_r = avoid_radius * 1.1  # tighter arc — get behind ball faster
+    arc_r = avoid_radius * 1.3
 
     bk_x, bk_y = -ux, -uy
     sd_x, sd_y = px * committed_side, py * committed_side
