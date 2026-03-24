@@ -51,9 +51,12 @@ HOME_BLUE       = (1800, 0)
 BALL_START      = (-1200, 0)
 
 # -- Tuning ------------------------------------------------------------
-CLAIM_DIST      = 2200      # mm — ball within this = I go for it
-APPROACH_SPD    = CRUISE_SPEED
-SETUP_PAUSE     = 2.0
+CLAIM_DIST          = 2200      # mm — ball within this = I go for it
+APPROACH_SPD        = CRUISE_SPEED
+SETUP_PAUSE         = 2.0
+RECEIVE_STOP_SPEED  = 180       # mm/s — ball "stopped" threshold for Blue
+REPOSITION_SWING_R  = 750       # mm — lateral swing radius around ball
+REPOSITION_BEHIND   = BEHIND_DIST + 120  # mm — lineup distance behind ball
 
 # Exported for UI overlay
 ATK_START       = HOME_YELLOW
@@ -102,10 +105,12 @@ def _at(me, target, radius):
 #  MAIN — one process per robot
 #
 #  Modes:
-#    setup   — teleport, place ball
-#    home    — predict incoming ball, intercept passes
-#    active  — kick_engine handles approach + align + burst
-#    retreat — go back to home
+#    setup       — teleport, place ball
+#    home        — predict incoming ball, move to intercept
+#    receive     — Blue only: intercept + absorb pass, wait for ball to stop
+#    reposition  — Blue only: arc wide around ball to get behind it
+#    active      — kick_engine: approach + align + burst (Yellow→mate, Blue→goal)
+#    retreat     — go back to home
 # =====================================================================
 
 def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
@@ -150,6 +155,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     last_ball_xy = None
 
     ks = KickState()
+    repo_side = 1      # +1 / -1 — which side Blue swings around ball
 
     while is_running.is_set():
         now = time.time()
@@ -241,14 +247,99 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 if my_dist < 600:
                     dribble = 1
 
-                # Ball is mine -> go active
+                # Ball is mine
                 if my_dist < CLAIM_DIST and my_dist < mate_dist - 100:
-                    mode = "active"
-                    ks.reset()
-                    print(f"[coop {tag}] ball is mine — going for it")
+                    if is_yellow:
+                        mode = "active"
+                        ks.reset()
+                        print(f"[coop yellow] ball is mine — going for it")
+                    else:
+                        mode = "receive"
+                        print(f"[coop blue] ball is mine — receiving")
             else:
                 vx, vy = _go_to(me, home, APPROACH_SPD, stop_r=80)
                 w = _face(me, mate_pos)
+
+        # ==============================================================
+        #  RECEIVE (Blue only) — intercept pass, wait for ball to stop
+        # ==============================================================
+        elif mode == "receive":
+            if ball is None:
+                mode = "home"
+                time.sleep(LOOP_RATE)
+                continue
+
+            if bspeed > RECEIVE_STOP_SPEED:
+                # Ball still moving — run to intercept
+                dx = me[0] - ball[0]
+                dy = me[1] - ball[1]
+                dd = max(math.hypot(dx, dy), 1.0)
+                approach_spd_val = (bvx * dx + bvy * dy) / dd
+                if approach_spd_val > 80 and my_dist > 150:
+                    t_arrive = max(dd / max(bspeed, 1.0), 0.1)
+                    intercept = predict_ball(
+                        ball, (bvx, bvy), min(t_arrive, 2.0))
+                    vx, vy = _go_to(me, intercept, APPROACH_SPD,
+                                    stop_r=50, ramp=500)
+                else:
+                    vx, vy = _go_to(me, ball, APPROACH_SPD * 0.4, stop_r=80)
+                dribble = 1
+                w = _face(me, ball)
+            else:
+                # Ball stopped — pick arc side and reposition
+                if ball[1] > HALF_WID - 500:
+                    repo_side = -1          # near top wall → swing below
+                elif ball[1] < -(HALF_WID - 500):
+                    repo_side = 1           # near bottom wall → swing above
+                else:
+                    repo_side = 1 if me[1] >= ball[1] else -1
+                mode = "reposition"
+                ks.reset()
+                print(f"[coop blue] ball stopped — repositioning (side={repo_side:+d})")
+
+        # ==============================================================
+        #  REPOSITION (Blue only) — arc around ball to line up behind it
+        # ==============================================================
+        elif mode == "reposition":
+            if ball is None:
+                mode = "home"
+                time.sleep(LOOP_RATE)
+                continue
+
+            # Direction ball → goal
+            gdx = HALF_LEN - ball[0]
+            gdy = 0.0   - ball[1]
+            gd  = max(math.hypot(gdx, gdy), 1.0)
+            ux, uy = gdx / gd, gdy / gd     # unit vec toward goal
+
+            # Target: directly behind ball (away from goal)
+            behind_pt = (ball[0] - ux * REPOSITION_BEHIND,
+                         ball[1] - uy * REPOSITION_BEHIND)
+
+            d_behind = _dist(me, behind_pt)
+
+            # Drive toward behind point
+            rel_nav = world2robot(me, behind_pt)
+            vx, vy = move_toward(rel_nav, APPROACH_SPD, ramp_dist=400, stop_dist=30)
+            w = _face(me, ball)
+            dribble = 0
+
+            # Strong ball repulsion — forces Blue to arc around the ball
+            if my_dist < REPOSITION_SWING_R:
+                push = APPROACH_SPD * 1.6 * (1.0 - my_dist / REPOSITION_SWING_R)
+                away_x = (me[0] - ball[0]) / max(my_dist, 1.0)
+                away_y = (me[1] - ball[1]) / max(my_dist, 1.0)
+                # Bias toward chosen side so the arc is consistent
+                perp_x = -away_y * repo_side
+                perp_y =  away_x * repo_side
+                vx += (away_x * 0.55 + perp_x * 0.45) * push
+                vy += (away_y * 0.55 + perp_y * 0.45) * push
+
+            # In position — hand off to kick engine
+            if d_behind < 220:
+                mode = "active"
+                ks.reset()
+                print(f"[coop blue] in position — shooting!")
 
         # ==============================================================
         #  ACTIVE — kick engine handles everything
@@ -348,9 +439,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
         # -- Obstacle avoidance (all modes except kicking burst) --------
         if not ks.bursting:
-            if mode == "home":
-                target_for_avoid = ball if ball is not None else mate_pos
-            elif mode == "active":
+            if mode in ("home", "receive", "active"):
                 target_for_avoid = ball if ball is not None else mate_pos
             else:
                 target_for_avoid = home
