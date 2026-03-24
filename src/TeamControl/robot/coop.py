@@ -17,9 +17,8 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
-    turn_then_move, ball_velocity, update_ball_history, predict_ball,
+    ball_velocity, update_ball_history, predict_ball,
 )
-# kick_engine no longer used — carrier logic is inline
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.robot.constants import (
@@ -146,51 +145,33 @@ def _line_blocked(start, end, obstacles, clearance=250):
 
 
 def _find_receive_pos(frame, is_yellow, robot_id, mate_is_yellow, mate_id):
-    """Find a receiving position that has a clear line to the goal.
-
-    Tries several candidate positions ahead of the ball and picks
-    the first one where the shot to goal isn't blocked by obstacles.
-    """
+    """Find a receiving position that has a clear line to the goal."""
     obs = _get_static_obstacles(frame, is_yellow, robot_id,
                                  mate_is_yellow, mate_id)
-
-    # Candidate positions: vary x and y to find a clear spot
     candidates = [
         (1200,  200), (1200, -200), (1200,    0),
         (1000,  350), (1000, -350), (1000,    0),
         ( 800,  400), ( 800, -400), ( 800,  200),
         (1400,  150), (1400, -150),
     ]
-
     goal = (HALF_LEN, 0)
-
     for cx, cy in candidates:
-        # Check: can this position see the goal?
         if not _line_blocked((cx, cy), goal, obs, clearance=200):
             return (cx, cy)
-
-    # Fallback — just go to default
     return (SUP_RECEIVE_X, SUP_RECEIVE_Y)
 
 
 def _avoid_all_robots(me, frame, is_yellow, robot_id, mate_is_yellow, mate_id):
-    """Reactive repulsion from EVERY other robot on the field.
-
-    Scans all robot IDs on both teams. Skips self, teammate, and
-    phantom robots (at origin or low confidence). Returns summed
-    repulsion (vx, vy) in robot frame.
-    """
-    AVOID_DIST = 400        # mm — start pushing at this distance
-    AVOID_STRENGTH = 5.0    # strong push to prevent any contact
+    """Reactive repulsion from EVERY other robot on the field."""
+    AVOID_DIST = 400
+    AVOID_STRENGTH = 5.0
 
     total_vx, total_vy = 0.0, 0.0
 
     for color in (True, False):
         for oid in range(16):
-            # Skip self
             if color == is_yellow and oid == robot_id:
                 continue
-            # Skip teammate (handled separately with softer repulsion)
             if color == mate_is_yellow and oid == mate_id:
                 continue
             try:
@@ -201,7 +182,6 @@ def _avoid_all_robots(me, frame, is_yellow, robot_id, mate_is_yellow, mate_id):
                     continue
                 op = other.position
                 ox, oy = float(op[0]), float(op[1])
-                # Skip phantoms at origin
                 if abs(ox) < 1 and abs(oy) < 1:
                     continue
 
@@ -211,7 +191,7 @@ def _avoid_all_robots(me, frame, is_yellow, robot_id, mate_is_yellow, mate_id):
                     continue
 
                 t = (AVOID_DIST - d) / AVOID_DIST
-                strength = AVOID_STRENGTH * t * t  # quadratic — strong close up
+                strength = AVOID_STRENGTH * t * t
                 inv_d = 1.0 / d
                 total_vx -= rel[0] * inv_d * strength
                 total_vy -= rel[1] * inv_d * strength
@@ -275,7 +255,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
     # -- State ----------------------------------------------------------
     mode = "setup"
-    # Yellow ALWAYS starts as carrier, blue ALWAYS starts as support
     my_role = "carrier" if is_yellow else "support"
     frame = None
     last_ft = 0.0
@@ -288,15 +267,15 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     ball_history = []
     last_ball_xy = None
 
-    # Kick state — simple, no kick engine
+    # Kick state — inline, no kick engine
     last_kick_time = 0.0
-    kick_burst_end = 0.0
     bursting = False
+    burst_end = 0.0
 
-    # Pass tracking — must complete at least 1 pass before shooting
+    # Pass tracking
     pass_count = 0
     prev_role = my_role
-    kicked = False          # True after this robot has kicked — retreat immediately
+    kicked = False
 
     while is_running.is_set():
         now = time.time()
@@ -342,7 +321,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
 
-        # -- Goal detection → reset ------------------------------------
+        # -- Goal detection -> reset ------------------------------------
         if mode == "play" and ball is not None:
             if ball[0] > HALF_LEN - 80:
                 cycle_count += 1
@@ -353,16 +332,16 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 pass_count = 0
                 kicked = False
 
-        # -- Cycle timeout → reset -------------------------------------
+        # -- Cycle timeout -> reset -------------------------------------
         if mode == "play" and (now - cycle_start) > CYCLE_TIMEOUT:
-            print(f"[coop {tag}] timeout — resetting")
+            print(f"[coop {tag}] timeout -- resetting")
             mode = "reset"
             reset_time = now
             bursting = False
             pass_count = 0
             kicked = False
 
-        # -- Role determination (play mode only) ------------------------
+        # -- Role determination -----------------------------------------
         if mode == "play" and ball is not None:
             if kicked:
                 my_role = "support"
@@ -382,7 +361,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             prev_role = my_role
 
         # ==============================================================
-        #  SETUP — go home, place ball
+        #  SETUP
         # ==============================================================
         if mode == "setup":
             vx, vy = _go_to(me, home, APPROACH_SPD)
@@ -404,7 +383,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 print(f"[coop {tag}] play!")
 
         # ==============================================================
-        #  PLAY — carrier / support
+        #  PLAY
         # ==============================================================
         elif mode == "play":
             if ball is None:
@@ -412,12 +391,12 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 w = _face(me, GOAL_TARGET)
 
             # ----------------------------------------------------------
-            #  CARRIER — same approach as right-click "go to ball"
+            #  CARRIER — go to ball, kick toward aim
             #
-            #  Far:   drive to ball fast, face ball
-            #  Mid:   slow down, dribble, start facing aim
-            #  Close: dribble, rotate toward aim, kick when aligned
-            #  Burst: hold kick for a bit so grSim registers
+            #  Same style as right-click "go to ball & kick":
+            #  Far  -> cruise to ball, face ball
+            #  Mid  -> slow, dribble, blend facing toward aim
+            #  Close -> dribble, rotate to aim, kick when ~aligned
             # ----------------------------------------------------------
             elif my_role == "carrier":
                 rel_ball = world2robot(me, ball)
@@ -425,7 +404,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 ang_ball = math.atan2(rel_ball[1], rel_ball[0])
                 dist_to_goal = _dist(me[:2], GOAL_TARGET)
 
-                # Decide aim target
+                # Decide aim
                 goal_aim = _pick_goal_aim(me)
                 can_shoot = (pass_count >= 1 and dist_to_goal < SHOOT_RANGE)
                 aim = goal_aim if can_shoot else (mate_pos[0], mate_pos[1])
@@ -433,56 +412,50 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 rel_aim = world2robot(me, aim)
                 ang_aim = math.atan2(rel_aim[1], rel_aim[0])
 
-                # --- Kick burst in progress ---
                 if bursting:
+                    # Kick burst — drive forward + kick for a bit
                     kick = 1
                     dribble = 1
                     vx = 0.3
                     vy = 0.0
                     w = clamp(ang_aim * 0.5, -MAX_W, MAX_W)
-                    if now > kick_burst_end:
+                    if now > burst_end:
                         bursting = False
                         if not can_shoot:
                             kicked = True
                             my_role = "support"
                             print(f"[coop {tag}] kicked, retreating")
 
-                # --- Far from ball (>600mm) — cruise toward it ---
                 elif d_ball > 600:
+                    # Far — cruise toward ball
                     vx, vy = move_toward(rel_ball, 0.6,
                                          ramp_dist=800, stop_dist=250)
                     w = clamp(ang_ball * 0.6, -MAX_W, MAX_W)
 
-                # --- Mid range (>130mm) — slow + dribble ---
                 elif d_ball > 130:
+                    # Mid — slow down, dribble, start facing aim
                     dribble = 1
                     vx, vy = move_toward(rel_ball, 0.25,
                                          ramp_dist=400, stop_dist=60)
-                    # Blend facing: mostly ball, some aim
                     w = clamp(ang_ball * 0.5 + ang_aim * 0.2,
                               -MAX_W, MAX_W)
 
-                # --- Close (<130mm) — rotate to aim, kick when ready ---
                 else:
+                    # Close — dribble, rotate to aim, kick when good enough
                     dribble = 1
-                    # Gentle forward pressure to keep ball on dribbler
                     vx = 0.08
                     vy = clamp(rel_ball[1] * 0.3, -0.06, 0.06)
-                    # Rotate to face aim
                     w = clamp(ang_aim * 1.2, -MAX_W, MAX_W)
 
-                    # Kick when roughly aligned — don't wait for perfect
                     can_kick = (now - last_kick_time) > KICK_COOLDOWN
-                    aligned = abs(ang_aim) < 0.35  # ~20 deg — good enough
-                    waited = d_ball < 130 and abs(ang_aim) < 0.8  # force after a bit
-
-                    if can_kick and (aligned or waited):
+                    aligned = abs(ang_aim) < 0.35   # ~20 deg
+                    if can_kick and aligned:
                         kick = 1
                         dribble = 0
                         vx = 0.3
                         vy = 0.0
                         bursting = True
-                        kick_burst_end = now + 0.5
+                        burst_end = now + 0.5
                         last_kick_time = now
                         if can_shoot:
                             print(f"[coop {tag}] SHOT!")
@@ -491,14 +464,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
 
             # ----------------------------------------------------------
             #  SUPPORT
-            #
-            #  Before pass: go to receiving position, wait for pass.
-            #  After pass (I already passed, mate is scoring): GET OUT
-            #  OF THE WAY — retreat far from ball so I don't block.
             # ----------------------------------------------------------
             else:
                 if kicked:
-                    # I already kicked — get out of the way fast
+                    # Already kicked — retreat out of the way
                     retreat_x = ball[0] - 1500
                     retreat_y = -me[1] * 0.6
                     retreat_x = clamp(retreat_x, -HALF_LEN + 300, HALF_LEN - 600)
@@ -515,7 +484,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                         w = _face(me, retreat_pos)
 
                 else:
-                    # Waiting for pass — go to clear receiving position
+                    # Waiting for pass
                     dx_to_me = me[0] - ball[0]
                     dy_to_me = me[1] - ball[1]
                     dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
@@ -525,7 +494,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                    and dd_to_me < 3000)
 
                     if ball_coming:
-                        # Ball passed to me — intercept it
+                        # Ball passed to me — intercept
                         t_a = max(dd_to_me / max(bspeed, 1.0), 0.1)
                         intercept = predict_ball(
                             ball, (bvx, bvy), min(t_a, 2.0))
@@ -535,7 +504,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                         w = _face(me, ball)
 
                     else:
-                        # Find position with clear shot to goal
+                        # Go to clear receiving position and wait
                         receive_pos = _find_receive_pos(
                             frame, is_yellow, robot_id,
                             mate_is_yellow, teammate_id)
@@ -552,7 +521,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                             w = _face(me, ball)
 
         # ==============================================================
-        #  RESET — go home, re-place ball, loop
+        #  RESET
         # ==============================================================
         elif mode == "reset":
             vx, vy = _go_to(me, home, APPROACH_SPD)
@@ -578,7 +547,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 ball_history.clear()
                 print(f"[coop {tag}] next cycle")
 
-        # -- Avoid all robots on field (static obstacles + teammate) -----
+        # -- Avoid all robots on field ----------------------------------
         if not bursting:
             avoid_vx, avoid_vy = _avoid_all_robots(
                 me, frame, is_yellow, robot_id,
@@ -592,10 +561,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         if spd > max_spd:
             vx = vx / spd * max_spd
             vy = vy / spd * max_spd
-
-        # turn_then_move removed — kick engine handles its own approach
-        # and applying it here killed velocity when robot needed to go
-        # away from ball to get behind it
 
         # -- Wall braking -----------------------------------------------
         vx, vy = wall_brake(me[0], me[1], vx, vy)
