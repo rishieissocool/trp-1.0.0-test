@@ -226,8 +226,8 @@ def kick_tick(ks, me, ball, aim, now, rel_ball=None, d_ball=None):
     d_nav = math.hypot(rel_nav[0], rel_nav[1])
 
     # Check if we're truly behind: ball must be in front of us AND
-    # we must be tightly facing the aim direction
-    facing_aim = abs(ang_aim) < 0.20  # ~11 deg — must be nearly straight behind
+    # we must be facing the aim direction
+    facing_aim = abs(ang_aim) < 0.30  # ~17 deg — straight behind but not so tight it oscillates
     ball_in_front = rel_ball[0] > 0
 
     if is_behind and d_nav < 300 and d_ball < BALL_NEAR and facing_aim and ball_in_front:
