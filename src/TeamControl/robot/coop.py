@@ -35,14 +35,14 @@ from TeamControl.robot.constants import (
 
 
 # Starting positions (setup + reset only)
-HOME_YELLOW     = (-1500, -500)
-HOME_BLUE       = (-1500,  500)
+HOME_YELLOW     = (-1500, -700)
+HOME_BLUE       = (-1500,  700)
 BALL_START      = (-1300,    0)
 GOAL_TARGET     = (HALF_LEN, 0)
 
 # -- Decision thresholds -------------------------------------------------
 SHOOT_RANGE     = 1800      # mm — shoot if closer to goal than this
-PASS_MAX_DIST   = 2500      # mm — max distance for a pass attempt
+PASS_MAX_DIST   = 3500      # mm — max distance for a pass attempt (wider spacing)
 CARRIER_MARGIN  = 150       # mm — hysteresis for role switching
 APPROACH_SPD    = CRUISE_SPEED
 SETUP_PAUSE     = 2.0
@@ -50,10 +50,10 @@ RESET_PAUSE     = 2.0
 CYCLE_TIMEOUT   = 15.0
 
 # -- Support positioning -------------------------------------------------
-SUP_ADVANCE_FRAC = 0.4     # fraction of ball-to-goal distance to advance
-SUP_ADVANCE_MIN  = 500
-SUP_ADVANCE_MAX  = 1500
-SUP_LATERAL      = 550     # mm lateral offset from carrier side
+SUP_ADVANCE_FRAC = 0.5     # fraction of ball-to-goal distance to advance
+SUP_ADVANCE_MIN  = 700
+SUP_ADVANCE_MAX  = 1800
+SUP_LATERAL      = 750     # mm lateral offset from carrier side
 LANE_CLEARANCE   = 250     # mm obstacle clearance for pass/shot lane
 SUP_REPLAN_DIST  = 400     # mm — only replan support position when ball moves this far
 SUP_STOP_DIST    = 80      # mm — stop moving when this close to target position
@@ -276,6 +276,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
     sup_planned_pos = None       # the locked-in support position
     sup_last_ball = None         # ball position when we last planned
 
+    # Pass tracking — must complete at least 1 pass before shooting
+    pass_count = 0               # passes completed this cycle
+    prev_role = my_role          # detect role switches (= pass received)
+
     while is_running.is_set():
         now = time.time()
 
@@ -324,11 +328,12 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         if mode == "play" and ball is not None:
             if ball[0] > HALF_LEN - 80:
                 cycle_count += 1
-                print(f"[coop {tag}] GOAL! (cycle {cycle_count})")
+                print(f"[coop {tag}] GOAL! (cycle {cycle_count}, passes={pass_count})")
                 mode = "reset"
                 reset_time = now
                 ks.reset()
                 sup_planned_pos = None
+                pass_count = 0
 
         # -- Cycle timeout → reset -------------------------------------
         if mode == "play" and (now - cycle_start) > CYCLE_TIMEOUT:
@@ -337,6 +342,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             reset_time = now
             ks.reset()
             sup_planned_pos = None
+            pass_count = 0
 
         # -- Role determination (play mode only) ------------------------
         if mode == "play" and ball is not None:
@@ -344,6 +350,10 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 pass
             elif my_dist < mate_dist - CARRIER_MARGIN:
                 if my_role != "carrier":
+                    # Was support, now carrier = I received a pass
+                    if prev_role == "support":
+                        pass_count += 1
+                        print(f"[coop {tag}] pass received! (count={pass_count})")
                     my_role = "carrier"
                     ks.reset()
                     sup_planned_pos = None
@@ -355,6 +365,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     ks.reset()
                     dnav.clear()
                     print(f"[coop {tag}] -> support")
+            prev_role = my_role
 
         # ==============================================================
         #  SETUP
@@ -409,13 +420,18 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                   and _lane_clear(me[:2], mate_pos, obstacles))
 
                 # -- Choose aim: shoot, pass to mate, or dribble -------
+                # Must complete at least 1 pass before shooting at goal
                 goal_aim = _pick_goal_aim(me)
-                if (dist_to_goal < SHOOT_RANGE
-                        and _lane_clear(me[:2], goal_aim, obstacles)):
+                can_shoot = (pass_count >= 1
+                             and dist_to_goal < SHOOT_RANGE
+                             and _lane_clear(me[:2], goal_aim, obstacles))
+
+                if can_shoot:
                     aim = goal_aim
-                elif mate_ahead and mate_reachable:
+                elif mate_reachable:
                     aim = mate_pos
                 else:
+                    # Dribble forward toward mate area if can't pass yet
                     aim = (min(ball[0] + 1000, HALF_LEN - 100),
                            ball[1] * 0.5)
 
@@ -528,6 +544,8 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 mode = "play"
                 cycle_start = now
                 my_role = "carrier" if is_yellow else "support"
+                prev_role = my_role
+                pass_count = 0
                 ks.reset()
                 ball_history.clear()
                 sup_planned_pos = None
