@@ -43,17 +43,17 @@ GOAL_TARGET     = (HALF_LEN, 0)
 # -- Decision thresholds -------------------------------------------------
 SHOOT_RANGE     = 1800      # mm — shoot if closer to goal than this
 PASS_MAX_DIST   = 3500      # mm — max distance for a pass attempt (wider spacing)
-CARRIER_MARGIN  = 150       # mm — hysteresis for role switching
+CARRIER_MARGIN  = 500       # mm — large hysteresis so roles don't flip-flop
 APPROACH_SPD    = CRUISE_SPEED
 SETUP_PAUSE     = 2.0
 RESET_PAUSE     = 2.0
 CYCLE_TIMEOUT   = 15.0
 
 # -- Support positioning -------------------------------------------------
-SUP_ADVANCE_FRAC = 0.5     # fraction of ball-to-goal distance to advance
-SUP_ADVANCE_MIN  = 700
-SUP_ADVANCE_MAX  = 1800
-SUP_LATERAL      = 750     # mm lateral offset from carrier side
+SUP_ADVANCE_FRAC = 0.55    # fraction of ball-to-goal distance to advance
+SUP_ADVANCE_MIN  = 900
+SUP_ADVANCE_MAX  = 2000
+SUP_LATERAL      = 1000    # mm lateral offset — keep robots far apart
 LANE_CLEARANCE   = 250     # mm obstacle clearance for pass/shot lane
 SUP_REPLAN_DIST  = 400     # mm — only replan support position when ball moves this far
 SUP_STOP_DIST    = 80      # mm — stop moving when this close to target position
@@ -163,14 +163,20 @@ def _pick_goal_aim(me):
 
 def _coop_avoidance(me, frame, is_yellow, robot_id, mate_is_yellow,
                      mate_id, rel_target):
-    """Obstacle avoidance that skips the teammate — only avoids everyone else.
+    """Obstacle avoidance — avoids everyone INCLUDING teammate.
 
+    Teammate gets even stronger repulsion to guarantee no collisions.
     Returns (avoid_vx, avoid_vy, closest_obs_dist).
     """
     AVOID_DIST = 550
     AVOID_CRITICAL = 260
     AVOID_STRENGTH = 2.5
     TANGENT_RATIO = 0.3
+
+    # Teammate avoidance — stronger and starts further out
+    MATE_AVOID_DIST = 700
+    MATE_AVOID_CRITICAL = 350
+    MATE_AVOID_STRENGTH = 3.5
 
     avoid_vx, avoid_vy = 0.0, 0.0
     closest_obs = 9999.0
@@ -180,9 +186,7 @@ def _coop_avoidance(me, frame, is_yellow, robot_id, mate_is_yellow,
             # Skip myself
             if color == is_yellow and oid == robot_id:
                 continue
-            # Skip my teammate
-            if color == mate_is_yellow and oid == mate_id:
-                continue
+            is_mate = (color == mate_is_yellow and oid == mate_id)
             try:
                 other = frame.get_yellow_robots(isYellow=color, robot_id=oid)
                 if isinstance(other, int) or other is None:
@@ -196,13 +200,18 @@ def _coop_avoidance(me, frame, is_yellow, robot_id, mate_is_yellow,
                 if d_obs < closest_obs:
                     closest_obs = d_obs
 
-                if d_obs >= AVOID_DIST:
+                # Use stronger avoidance for teammate
+                a_dist = MATE_AVOID_DIST if is_mate else AVOID_DIST
+                a_crit = MATE_AVOID_CRITICAL if is_mate else AVOID_CRITICAL
+                a_str = MATE_AVOID_STRENGTH if is_mate else AVOID_STRENGTH
+
+                if d_obs >= a_dist:
                     continue
-                if d_obs <= AVOID_CRITICAL:
-                    strength = AVOID_STRENGTH
+                if d_obs <= a_crit:
+                    strength = a_str
                 else:
-                    t = (AVOID_DIST - d_obs) / (AVOID_DIST - AVOID_CRITICAL)
-                    strength = AVOID_STRENGTH * 0.5 * (1.0 - math.cos(math.pi * t))
+                    t = (a_dist - d_obs) / (a_dist - a_crit)
+                    strength = a_str * 0.5 * (1.0 - math.cos(math.pi * t))
 
                 if strength > 0.001 and d_obs > 1:
                     inv_d = 1.0 / d_obs
@@ -479,10 +488,12 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 dd_to_me = max(math.hypot(dx_to_me, dy_to_me), 1.0)
                 approach_spd = (bvx * dx_to_me + bvy * dy_to_me) / dd_to_me
 
-                ball_coming = bspeed > 150 and approach_spd > 80
+                # Only intercept when ball is clearly kicked toward me
+                ball_coming = (bspeed > 350 and approach_spd > 200
+                               and dd_to_me < 2500)
 
                 if ball_coming:
-                    # -- Ball is coming toward me — intercept it -------
+                    # -- Ball is clearly passed to me — intercept it ---
                     t_a = max(dd_to_me / max(bspeed, 1.0), 0.1)
                     intercept = predict_ball(
                         ball, (bvx, bvy), min(t_a, 2.0))
@@ -521,7 +532,8 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                                         stop_r=SUP_STOP_DIST, ramp=400)
                         w = _face(me, ball)
 
-                if my_dist < 600:
+                # Only dribble if ball is literally touching me
+                if my_dist < 150:
                     dribble = 1
 
         # ==============================================================
@@ -564,8 +576,8 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 mate_is_yellow, teammate_id, rel_target)
 
             if dribble == 1 and my_role == "carrier":
-                avoid_vx *= 0.4
-                avoid_vy *= 0.4
+                avoid_vx *= 0.6
+                avoid_vy *= 0.6
 
             vx += avoid_vx
             vy += avoid_vy
