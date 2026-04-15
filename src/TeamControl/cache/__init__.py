@@ -22,6 +22,7 @@ from .ball_cache import BallCache
 from .robot_cache import RobotCache
 from .team_cache import TeamCache
 from .game_state_cache import GameStateCache
+from .onboard_ball_cache import OnboardBallCache
 from .tick_cache import TickCache
 
 __all__ = [
@@ -30,5 +31,6 @@ __all__ = [
     "RobotCache",
     "TeamCache",
     "GameStateCache",
+    "OnboardBallCache",
     "TickCache",
 ]

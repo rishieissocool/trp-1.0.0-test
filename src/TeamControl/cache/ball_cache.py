@@ -16,10 +16,12 @@ class BallCache:
     """Per-frame ball state.
 
     Fields:
-      position  -> (x, y) or None when occluded
-      visible   -> True when this frame had a ball
-      velocity  -> (vx, vy, speed) computed from the history buffer
-      history   -> rolling [(t, x, y), ...] up to BALL_HISTORY_SIZE
+      position     -> (x, y) from SSL-Vision, or None when occluded
+      visible      -> True when this frame had a ball from SSL-Vision
+      velocity     -> (vx, vy, speed) computed from the history buffer
+      history      -> rolling [(t, x, y), ...] up to BALL_HISTORY_SIZE
+      fused_position (via `fused_position(...)`) -> position, or an
+          onboard-camera estimate when SSL-Vision has lost the ball
     """
 
     def __init__(self, history_size=BALL_HISTORY_SIZE):
@@ -87,3 +89,29 @@ class BallCache:
             return None
         vx, vy, _ = self.velocity
         return predict_ball(self._position, (vx, vy), dt)
+
+    def fused_position(self, onboard_cache, is_yellow, robot_id,
+                       robot_pose, now=None, memory_time=None):
+        """SSL-Vision ball if available, else onboard-camera estimate.
+
+        Tiered fallback:
+          1. Current SSL-Vision position (authoritative).
+          2. Last-known SSL-Vision position within `memory_time`.
+          3. Onboard camera estimate from the robot looking at the ball.
+
+        Returns (x, y, source) where source is one of
+        "ssl", "ssl_memory", "onboard", or None when no fix is available.
+        """
+        if self._visible and self._position is not None:
+            return (self._position[0], self._position[1], "ssl")
+
+        lk = self.last_known(now=now, memory_time=memory_time)
+        if lk is not None:
+            return (lk[0], lk[1], "ssl_memory")
+
+        if onboard_cache is not None and onboard_cache.enabled():
+            est = onboard_cache.estimate_ball_position(
+                is_yellow, robot_id, robot_pose)
+            if est is not None:
+                return (est[0], est[1], "onboard")
+        return None

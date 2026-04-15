@@ -23,12 +23,13 @@ from .ball_cache import BallCache
 from .robot_cache import RobotCache
 from .team_cache import TeamCache
 from .game_state_cache import GameStateCache
+from .onboard_ball_cache import OnboardBallCache
 
 
 class TickCache:
     """Bundle of per-process category caches driven by the frame version."""
 
-    def __init__(self, wm, ball_history_size=None):
+    def __init__(self, wm, ball_history_size=None, onboard_store=None):
         self._wm = wm
         if ball_history_size is None:
             self.ball = BallCache()
@@ -37,10 +38,26 @@ class TickCache:
         self.robots = RobotCache()
         self.team = TeamCache(wm)
         self.game = GameStateCache(wm)
+        # Onboard cache is optional — `attach_onboard_store()` can bind
+        # one later when the receiver is set up at process start.
+        self.onboard = OnboardBallCache(store=onboard_store)
 
         self._frame = None
         self._version = None
         self._frame_changed = False
+
+    def attach_onboard_store(self, store):
+        """Point the onboard cache at a live OnboardObservationStore."""
+        self.onboard.attach(store)
+
+    def fused_ball(self, is_yellow, robot_id,
+                   memory_time=None):
+        """Best-available ball position for this robot: SSL-Vision first,
+        then onboard camera. Returns (x, y, source) or None."""
+        rpos = self.robots.get_position(is_yellow, robot_id)
+        return self.ball.fused_position(
+            self.onboard, is_yellow, robot_id, rpos,
+            now=None, memory_time=memory_time)
 
     def refresh(self, now):
         """Pull latest frame + version from wm and refresh all categories.
