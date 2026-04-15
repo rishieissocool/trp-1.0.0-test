@@ -12,9 +12,8 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.ball_nav import (
-    clamp, move_toward, ball_velocity, update_ball_history,
-)
+from TeamControl.robot.ball_nav import clamp, move_toward
+from TeamControl.cache import TickCache
 from TeamControl.robot.constants import (
     FIELD_LENGTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW,
@@ -45,55 +44,32 @@ def _clamp_to_box(x, y, goal_x):
 
 
 def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
-    frame = None
-    last_ft = 0.0
-    ball_history = []
-    last_ball_xy = None
+    cache = TickCache(wm)
 
     while is_running.is_set():
         now = time.time()
 
-        # ── Get frame ────────────────────────────────────────
-        if now - last_ft > FRAME_INTERVAL:
-            try:
-                f = wm.get_latest_frame()
-                if f is not None:
-                    frame = f
-            except Exception:
-                pass
-            last_ft = now
-
-        if frame is None or frame.ball is None:
+        # ── Refresh cache from latest frame ──────────────────
+        if not cache.refresh(now):
+            time.sleep(LOOP_RATE)
+            continue
+        if not cache.ball.visible:
             time.sleep(LOOP_RATE)
             continue
 
-        try:
-            robot = frame.get_yellow_robots(isYellow=is_yellow,
-                                            robot_id=goalie_id)
-        except Exception:
-            time.sleep(LOOP_RATE)
-            continue
-        if isinstance(robot, int):
+        rpos = cache.robots.get_position(is_yellow, goalie_id)
+        if rpos is None:
             time.sleep(LOOP_RATE)
             continue
 
-        try:
-            is_positive = wm.us_positive()
-        except Exception:
-            is_positive = True
-
-        rp = robot.position
-        bp = frame.ball.position
-        ball = (float(bp[0]), float(bp[1]))
-        rpos = (float(rp[0]), float(rp[1]), float(rp[2]))
+        ball = cache.ball.position
+        is_positive = cache.team.us_positive
 
         sign = 1 if is_positive else -1
         goal_x = sign * (FIELD_LENGTH / 2)
 
-        # ── Ball velocity ────────────────────────────────────
-        last_ball_xy = update_ball_history(ball_history, now, ball,
-                                           last_ball_xy)
-        bvx, bvy, bspeed = ball_velocity(ball_history)
+        # ── Ball velocity (cached; recomputed only on new frame) ──
+        bvx, bvy, bspeed = cache.ball.velocity
 
         # ── Distances ────────────────────────────────────────
         rel_ball = world2robot(rpos, ball)

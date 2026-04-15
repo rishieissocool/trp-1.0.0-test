@@ -21,6 +21,7 @@ from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate, turn_then_move,
 )
+from TeamControl.cache import TickCache
 from TeamControl.robot.constants import (
     FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     CRUISE_SPEED, SPRINT_SPEED, MAX_W, TURN_GAIN,
@@ -147,40 +148,30 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
     Chase the ball smoothly while avoiding every other robot on the field.
     The `waypoints` argument is accepted for API compatibility but ignored.
     """
-    frame = None
+    cache = TickCache(wm)
     prev_obs_pos = {}
     # Exponential-smoothed output velocities
     sm_vx, sm_vy, sm_w = 0.0, 0.0, 0.0
     dnav = DiamondNav()
 
     while is_running.is_set():
-        # ── Fetch frame (every tick for fast obstacle reaction) ─
-        try:
-            f = wm.get_latest_frame()
-            if f is not None:
-                frame = f
-        except Exception:
-            pass
+        now = time.time()
 
-        if frame is None or frame.ball is None:
+        # ── Refresh cache (ball, robots, team, game) ────────
+        if not cache.refresh(now):
+            time.sleep(LOOP_RATE)
+            continue
+        if not cache.ball.visible:
             time.sleep(LOOP_RATE)
             continue
 
-        try:
-            robot = frame.get_yellow_robots(isYellow=is_yellow,
-                                            robot_id=robot_id)
-        except Exception:
+        rpos = cache.robots.get_position(is_yellow, robot_id)
+        if rpos is None:
             time.sleep(LOOP_RATE)
             continue
 
-        if isinstance(robot, int):
-            time.sleep(LOOP_RATE)
-            continue
-
-        rp = robot.position
-        bp = frame.ball.position
-        rpos = (float(rp[0]), float(rp[1]), float(rp[2]))
-        ball = (float(bp[0]), float(bp[1]))
+        frame = cache.frame
+        ball = cache.ball.position
 
         # ── Diamond path planning — find next waypoint ────────
         nav_target = ball

@@ -18,11 +18,12 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
-    turn_then_move, ball_velocity, update_ball_history, predict_ball,
+    turn_then_move, predict_ball,
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
 from TeamControl.robot.diamond_nav import DiamondNav
+from TeamControl.cache import TickCache
 from TeamControl.robot.constants import (
     FIELD_LENGTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -49,24 +50,16 @@ def _in_penalty_box(px, py, goal_x):
     return abs(px - goal_x) < PENALTY_DEPTH and abs(py) < PENALTY_HW
 
 
-def _pick_aim(ball, goal_x, frame, is_yellow):
+def _pick_aim(cache, ball, goal_x, is_yellow):
     """Pick aim point in goal mouth, away from opponent goalie."""
     aim_inward = 1 if goal_x > 0 else -1
     aim_x = goal_x + aim_inward * (GOAL_DEPTH * 0.5)
 
     gk_y = None
-    opp_yellow = not is_yellow
-    for oid in range(6):
-        try:
-            opp = frame.get_yellow_robots(isYellow=opp_yellow, robot_id=oid)
-            if isinstance(opp, int) or opp is None:
-                continue
-            op = opp.position
-            if abs(float(op[0]) - goal_x) < DEFENSE_DEPTH:
-                gk_y = float(op[1])
-                break
-        except Exception:
-            continue
+    for _oid, pos in cache.robots.iter_team(not is_yellow):
+        if abs(pos[0] - goal_x) < DEFENSE_DEPTH:
+            gk_y = pos[1]
+            break
 
     if gk_y is not None:
         aim_y = -GOAL_HW * 0.6 if gk_y > 0 else GOAL_HW * 0.6
@@ -76,21 +69,11 @@ def _pick_aim(ball, goal_x, frame, is_yellow):
     return (aim_x, aim_y)
 
 
-def _get_opponent(frame, is_yellow):
-    """Find the closest opponent robot, return (x, y, orientation) or None."""
-    opp_yellow = not is_yellow
-    best = None
-    for oid in range(6):
-        try:
-            opp = frame.get_yellow_robots(isYellow=opp_yellow, robot_id=oid)
-            if isinstance(opp, int) or opp is None:
-                continue
-            op = opp.position
-            if best is None:
-                best = (float(op[0]), float(op[1]), float(op[2]))
-        except Exception:
-            continue
-    return best
+def _get_opponent(cache, is_yellow):
+    """Return first visible opponent as (x, y, orientation), or None."""
+    for _oid, pos in cache.robots.iter_team(not is_yellow):
+        return pos
+    return None
 
 
 def _opponent_has_ball(opp, ball):
@@ -108,15 +91,9 @@ def _opponent_has_ball(opp, ball):
 # -- Main loop ------------------------------------------------------------
 
 def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
-    frame = None
-    last_ft = 0.0
-    last_ball = None
-    last_ball_time = 0.0
+    cache = TickCache(wm)
     last_d_ball = float('inf')
     prev_obs_pos = {}
-
-    ball_history = []
-    last_ball_xy = None
 
     ks = KickState()
     dnav = DiamondNav()
@@ -124,65 +101,33 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
     while is_running.is_set():
         now = time.time()
 
-        # -- Get frame --------------------------------------------------
-        if now - last_ft > FRAME_INTERVAL:
-            try:
-                f = wm.get_latest_frame()
-                if f is not None:
-                    frame = f
-            except Exception:
-                pass
-            last_ft = now
+        # -- Refresh all cached categories from the frame --------------
+        if not cache.refresh(now):
+            time.sleep(LOOP_RATE)
+            continue
+        frame = cache.frame
 
-        if frame is None:
+        rpos = cache.robots.get_position(is_yellow, robot_id)
+        if rpos is None:
             time.sleep(LOOP_RATE)
             continue
 
-        try:
-            robot = frame.get_yellow_robots(isYellow=is_yellow,
-                                            robot_id=robot_id)
-        except Exception:
-            time.sleep(LOOP_RATE)
-            continue
-        if isinstance(robot, int):
-            time.sleep(LOOP_RATE)
-            continue
-
-        rp = robot.position
-        rpos = (float(rp[0]), float(rp[1]), float(rp[2]))
-
-        # -- Resolve ball (use memory if occluded) ----------------------
-        ball_visible = frame.ball is not None
+        # -- Resolve ball (use memory if occluded) ---------------------
+        ball_visible = cache.ball.visible
         if ball_visible:
-            bp = frame.ball.position
-            ball = (float(bp[0]), float(bp[1]))
-            last_ball = ball
-            last_ball_time = now
-        elif last_ball is not None and \
-             (now - last_ball_time) < BALL_MEMORY_TIME and \
-             last_d_ball < BALL_NEAR:
-            ball = last_ball
+            ball = cache.ball.position
         else:
-            time.sleep(LOOP_RATE)
-            continue
+            ball = cache.ball.last_known(now, BALL_MEMORY_TIME)
+            if ball is None or last_d_ball >= BALL_NEAR:
+                time.sleep(LOOP_RATE)
+                continue
 
-        # -- Ball velocity ----------------------------------------------
-        if ball_visible:
-            last_ball_xy = update_ball_history(
-                ball_history, now, ball, last_ball_xy)
-        bvx, bvy, bspeed = ball_velocity(ball_history)
+        # -- Ball velocity (cached, recomputed on new frame) ----------
+        bvx, bvy, bspeed = cache.ball.velocity
 
-        try:
-            us_positive = wm.us_positive()
-        except Exception:
-            us_positive = True
-
-        # Goal positions
-        if is_yellow:
-            goal_x = -HALF_LEN if us_positive else HALF_LEN
-        else:
-            goal_x = HALF_LEN if us_positive else -HALF_LEN
-        our_goal_x = -goal_x
+        # -- Team / side info (cached) --------------------------------
+        goal_x = cache.team.goal_x(is_yellow)
+        our_goal_x = cache.team.their_goal_x(is_yellow)
 
         # -- Robot-local vectors ----------------------------------------
         rel_ball = world2robot(rpos, ball)
@@ -192,12 +137,12 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             last_d_ball = d_ball
 
         # -- Opponent info ----------------------------------------------
-        opp = _get_opponent(frame, is_yellow)
+        opp = _get_opponent(cache, is_yellow)
         opp_has_ball = _opponent_has_ball(opp, ball)
         opp_dist_to_ball = math.hypot(opp[0] - ball[0], opp[1] - ball[1]) \
             if opp is not None else float('inf')
 
-        aim = _pick_aim(ball, goal_x, frame, is_yellow)
+        aim = _pick_aim(cache, ball, goal_x, is_yellow)
 
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
