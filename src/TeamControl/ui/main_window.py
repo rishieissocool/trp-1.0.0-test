@@ -26,6 +26,7 @@ from TeamControl.ui.settings_page import SettingsPage
 from TeamControl.ui.dispatcher_panel import DispatcherPanel
 from TeamControl.ui.log_panel import LogPanel
 from TeamControl.ui.calibration_page import CalibrationPage
+from TeamControl.ui.onboard_possession_panel import OnboardPossessionPanel
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +54,7 @@ class MainWindow(QMainWindow):
             self._field, engine=self._engine, test_panel=self._test_panel)
         self._settings = SettingsPage()
         self._log_panel = LogPanel()
+        self._onboard_panel = OnboardPossessionPanel(engine=self._engine)
 
         # ── Central tabs ──────────────────────────────────────────
         self._tabs = QTabWidget()
@@ -64,6 +66,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._test_panel, "  Hardware Test  ")
         self._tabs.addTab(self._dispatch_panel, "  Dispatcher  ")
         self._tabs.addTab(self._calibration, "  Calibration  ")
+        self._tabs.addTab(self._onboard_panel, "  Onboard Possession  ")
         self.setCentralWidget(self._tabs)
 
         # ── Toolbar ──────────────────────────────────────────────
@@ -203,7 +206,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         for i, name in enumerate(["Dashboard", "Settings", "Console",
                                    "Hardware Test", "Dispatcher",
-                                   "Calibration"]):
+                                   "Calibration", "Onboard Possession"]):
             view_menu.addAction(
                 name, lambda checked=False, idx=i: self._tabs.setCurrentIndex(idx))
 

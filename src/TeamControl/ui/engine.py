@@ -27,6 +27,9 @@ from TeamControl.robot.coop import run_coop
 
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
+from TeamControl.onboard_vision import (
+    OnboardObservationStore, parse_packet,
+)
 
 
 # ── Snapshot dataclasses ─────────────────────────────────────────────
@@ -72,6 +75,7 @@ class SimEngine(QObject):
     engine_started = Signal(str)         # mode name
     engine_stopped = Signal()
     log_message = Signal(str)            # log line
+    onboard_packet = Signal(object, object)  # (OnboardObservation, addr)
 
     MODES = ["vision_only", "goalie", "1v1", "obstacle", "coop", "6v6"]
 
@@ -95,6 +99,9 @@ class SimEngine(QObject):
         self._mode = ""
         self._last_version = -1
 
+        self._onboard_store = OnboardObservationStore()
+        self._ip_to_robot: dict[str, tuple[bool, int]] = {}
+
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(16)  # ~60 fps
         self._poll_timer.timeout.connect(self._poll)
@@ -112,6 +119,14 @@ class SimEngine(QObject):
     @property
     def config(self) -> Config | None:
         return self._config
+
+    @property
+    def onboard_store(self) -> OnboardObservationStore:
+        return self._onboard_store
+
+    @property
+    def ip_to_robot(self) -> dict:
+        return self._ip_to_robot
 
     def set_field_manual_control(self, shell_id: int, is_yellow: bool, enabled: bool):
         """
@@ -138,6 +153,7 @@ class SimEngine(QObject):
 
         self._config = Config()
         preset = self._config
+        self._rebuild_ip_to_robot(preset)
 
         self._vision_q = Queue()
         self._gc_q = Queue()
@@ -341,9 +357,38 @@ class SimEngine(QObject):
                 data, addr = self._recv_q.get_nowait()
                 addr_str = f"{addr[0]}:{addr[1]}" if addr else "?"
                 self.log_message.emit(f"[recv] {addr_str} → {data}")
+                self._ingest_onboard_packet(data, addr)
                 batch += 1
             except Exception:
                 break
+
+    def _rebuild_ip_to_robot(self, preset):
+        mapping = {}
+        for is_yellow, team_dict in ((True, preset.yellow),
+                                     (False, preset.blue)):
+            if not team_dict:
+                continue
+            for _key, r in team_dict.items():
+                ip = r.get("ip")
+                sid = r.get("shellID")
+                if ip and sid is not None:
+                    mapping[ip] = (is_yellow, int(sid))
+        self._ip_to_robot = mapping
+
+    def _ingest_onboard_packet(self, data, addr):
+        obs = parse_packet(data)
+        if obs is None:
+            return
+        obs.recv_ts = time.time()
+        if obs.robot_id < 0 and addr:
+            m = self._ip_to_robot.get(addr[0])
+            if m is not None:
+                obs.is_yellow = bool(m[0])
+                obs.robot_id = int(m[1])
+        if obs.robot_id < 0:
+            return
+        self._onboard_store.put(obs)
+        self.onboard_packet.emit(obs, addr)
 
     def _extract_snapshot(self, frame) -> FrameSnapshot:
         snap = FrameSnapshot()
